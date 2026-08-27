@@ -29,7 +29,13 @@ from PySide6.QtWidgets import (
 
 from .. import ai_providers, config, denoise, filename_builder, vad, vocab_bias
 from ..config import Settings
-from ..transcriber import ENGINE_ELEVENLABS, ENGINE_LABELS, ENGINE_LOCAL, faster_whisper_available
+from ..transcriber import (
+    ENGINE_ELEVENLABS,
+    ENGINE_GEMINI,
+    ENGINE_LABELS,
+    ENGINE_LOCAL,
+    faster_whisper_available,
+)
 from .glossary_dialog import GlossaryLibraryDialog, populate_glossary_combo
 from .template_dialog import TemplateDialog
 from .theme import hint, muted_small
@@ -68,19 +74,21 @@ class OptionsPanel(QWidget):
         ef.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         ef.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.engine = _narrow_combo(QComboBox())
-        for engine_id in (ENGINE_LOCAL, ENGINE_ELEVENLABS):
+        tips = {
+            ENGINE_LOCAL: "Runs on this PC. Speakers need pyannote + a HuggingFace token.",
+            ENGINE_ELEVENLABS:
+                "Uploads the audio to ElevenLabs. Transcribes and detects speakers in one pass.",
+            ENGINE_GEMINI:
+                "Uploads the audio to Google. Transcribes and separates speakers in one pass, "
+                "using the same Google AI key as AI Cleanup.",
+        }
+        for row, engine_id in enumerate((ENGINE_LOCAL, ENGINE_ELEVENLABS, ENGINE_GEMINI)):
             self.engine.addItem(ENGINE_LABELS[engine_id], engine_id)
-        self.engine.setItemData(
-            0, "Runs on this PC. Speakers need pyannote + a HuggingFace token.",
-            Qt.ItemDataRole.ToolTipRole,
-        )
-        self.engine.setItemData(
-            1, "Uploads the audio to ElevenLabs. Transcribes and detects speakers in one pass.",
-            Qt.ItemDataRole.ToolTipRole,
-        )
+            self.engine.setItemData(row, tips[engine_id], Qt.ItemDataRole.ToolTipRole)
         idx = self.engine.findData(settings.stt_engine)
         self.engine.setCurrentIndex(idx if idx >= 0 else 0)
         self.engine.currentIndexChanged.connect(self._update_engine_status)
+        self.engine.currentIndexChanged.connect(self._update_pipeline_status)
         ef.addRow("Engine:", self.engine)
 
         self.engine_status = QLabel("")
@@ -482,7 +490,19 @@ class OptionsPanel(QWidget):
     # ---- engine -------------------------------------------------------
     def _update_engine_status(self, _index: int = 0):
         """Say what the current engine needs, before Go finds out the hard way."""
-        if self.engine.currentData() == ENGINE_ELEVENLABS:
+        if self.engine.currentData() == ENGINE_GEMINI:
+            if self.s.ai_key_google.strip():
+                self.engine_status.setText(
+                    f"Audio is uploaded to Google ({self.s.gemini_model}). It transcribes "
+                    "and separates speakers in one pass — no HuggingFace token or GPU "
+                    "needed. Vocabulary biasing is unavailable on this engine: the API "
+                    "refuses it alongside speakers and timestamps."
+                )
+            else:
+                self.engine_status.setText(
+                    "No Google AI key yet — add one in Settings (the same key AI Cleanup uses)."
+                )
+        elif self.engine.currentData() == ENGINE_ELEVENLABS:
             model = self.s.elevenlabs_model or "scribe_v1"
             if self.s.elevenlabs_api_key.strip():
                 self.engine_status.setText(
@@ -509,12 +529,17 @@ class OptionsPanel(QWidget):
 
     def ensure_engine_ready(self) -> str | None:
         """Validate the engine before a run, the way AI Cleanup is validated."""
-        if self.engine.currentData() != ENGINE_ELEVENLABS:
-            return None
-        if not self.s.elevenlabs_api_key.strip():
+        engine = self.engine.currentData()
+        if engine == ENGINE_ELEVENLABS and not self.s.elevenlabs_api_key.strip():
             return (
                 "ElevenLabs is selected as the transcription engine but no API key "
                 "is saved. Add one in Settings, or switch back to local Whisper."
+            )
+        if engine == ENGINE_GEMINI and not self.s.ai_key_google.strip():
+            return (
+                "Gemini is selected as the transcription engine but no Google AI key "
+                "is saved. Add one in Settings — it is the same key AI Cleanup uses — "
+                "or switch back to local Whisper."
             )
         return None
 
@@ -539,7 +564,13 @@ class OptionsPanel(QWidget):
         self.vad_status.setText(vad.describe(draft))
         terms = vocab_bias.collect_terms(draft)
         prompt = vocab_bias.build(terms, draft.bias_max_chars)
-        if not draft.bias_enabled:
+        if self.engine.currentData() != ENGINE_LOCAL:
+            self.bias_status.setText(
+                "Vocabulary biasing applies to the local engine only. Gemini's API "
+                "refuses a custom vocabulary alongside speakers and timestamps, and "
+                "ElevenLabs takes none."
+            )
+        elif not draft.bias_enabled:
             self.bias_status.setText("Biasing off — the decoder gets no vocabulary hints.")
         elif not terms:
             self.bias_status.setText(

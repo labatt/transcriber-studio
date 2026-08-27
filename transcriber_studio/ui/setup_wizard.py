@@ -52,7 +52,13 @@ from .. import (
 from ..config import Settings
 from ..hardware import cuda_available, cuda_device_name, torch_cuda_available
 from ..plaud_client import PLAUD_BIN
-from ..transcriber import ENGINE_ELEVENLABS, ENGINE_LABELS, ENGINE_LOCAL, faster_whisper_available
+from ..transcriber import (
+    ENGINE_ELEVENLABS,
+    ENGINE_GEMINI,
+    ENGINE_LABELS,
+    ENGINE_LOCAL,
+    faster_whisper_available,
+)
 from ..workers import AccountWorker
 from . import install_help
 from .install_help import InstallHelpDialog
@@ -276,7 +282,7 @@ class EnginePage(_Page):
 
         layout = QVBoxLayout(self)
         self.engine = QComboBox()
-        for engine_id in (ENGINE_LOCAL, ENGINE_ELEVENLABS):
+        for engine_id in (ENGINE_LOCAL, ENGINE_ELEVENLABS, ENGINE_GEMINI):
             self.engine.addItem(ENGINE_LABELS[engine_id], engine_id)
         idx = self.engine.findData(draft.stt_engine)
         self.engine.setCurrentIndex(idx if idx >= 0 else 0)
@@ -882,6 +888,12 @@ class FinishPage(_Page):
             rows.append(f"{OK} Engine: ElevenLabs Scribe ({preview.elevenlabs_model})")
             if not preview.elevenlabs_api_key:
                 rows.append(f"{BAD} No ElevenLabs API key — jobs will fail until one is added.")
+        elif preview.stt_engine == ENGINE_GEMINI:
+            rows.append(
+                f"{OK} Engine: Gemini ({preview.gemini_model}, {preview.gemini_mode} mode)"
+            )
+            if not preview.ai_key_google:
+                rows.append(f"{BAD} No Google AI key — jobs will fail until one is added.")
         else:
             rows.append(f"{OK} Engine: local Whisper ({preview.model}, device {preview.device})")
             if not faster_whisper_available():
@@ -891,6 +903,8 @@ class FinishPage(_Page):
             rows.append(f"{WARN} Speaker detection off.")
         elif preview.stt_engine == ENGINE_ELEVENLABS:
             rows.append(f"{OK} Speakers: detected by Scribe.")
+        elif preview.stt_engine == ENGINE_GEMINI:
+            rows.append(f"{OK} Speakers: separated by Gemini in the same pass.")
         elif not preview.hf_token:
             rows.append(f"{BAD} Speaker detection on, but no HuggingFace token — it will be skipped.")
         elif not diarization.is_available():

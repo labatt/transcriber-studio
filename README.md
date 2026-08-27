@@ -43,6 +43,7 @@ the decoder is told to expect**.
 - [Glossaries](#glossaries)
 - [AI cleanup](#ai-cleanup)
 - [Keeping it up to date](#keeping-it-up-to-date)
+- [Transcription engines](#transcription-engines)
 - [Models](#models)
 - [Where your data lives](#where-your-data-lives)
 - [Troubleshooting](#troubleshooting)
@@ -68,8 +69,10 @@ the decoder is told to expect**.
    before it starts guessing at them. The words come from your **shared glossary**, which fills
    itself in as jobs run: what one recording taught the app, the next one already knows.
 
-Then Whisper (or ElevenLabs Scribe) for the words, [pyannote](https://github.com/pyannote/pyannote-audio)
-for who said them, and an optional LLM pass to turn fragments into readable prose.
+Then a transcription engine for the words — local Whisper, ElevenLabs Scribe, or
+**Gemini 3.5 Transcribe** — [pyannote](https://github.com/pyannote/pyannote-audio) for who said
+them when the engine does not do that itself, and an optional LLM pass to turn fragments into
+readable prose.
 
 Every layer reports what it actually did, and says so when it fell back to something weaker —
 there is no configuration that quietly does nothing.
@@ -149,15 +152,19 @@ too. This is the configuration the app is tuned for.
 
 ### Without a GPU
 
-Everything still works. Three honest options:
+Everything still works. Four honest options:
 
 1. **Local Whisper on CPU** — use `small` (the app recommends it automatically). Expect roughly
    real time to a few times slower: an hour of audio in one to three hours. `large-v3` on CPU is
    possible but usually not worth the wait.
-2. **ElevenLabs Scribe** — a cloud engine that transcribes *and* diarizes in one pass, with no
-   local compute and no HuggingFace token. Costs money, and the audio leaves your machine.
-3. **Skip diarization** — it is the most expensive part on CPU. If you only need the words, turn
+2. **Gemini 3.5 Transcribe** — a cloud engine that transcribes *and* separates speakers in one
+   pass, using the same Google AI key as AI Cleanup. See [the engines](#transcription-engines).
+3. **ElevenLabs Scribe** — the same idea with a different provider and its own key.
+4. **Skip diarization** — it is the most expensive part on CPU. If you only need the words, turn
    speaker detection off.
+
+Both cloud engines mean no local compute and no HuggingFace token, but they cost money and the
+audio leaves your machine.
 
 The denoise and VAD layers are cheap on CPU either way. If you only take one thing from this
 README: **on hard audio, denoise + VAD + biasing on `small` beats `large-v3` on the raw file.**
@@ -443,6 +450,42 @@ yourself instead. Three things it handles that a plain `pip install --upgrade` g
   a new version-stamped folder and the old one stops existing.
 - **Permissions** — if an install is refused for lack of rights, it offers a user-scope install or
   an elevated re-run rather than just failing.
+
+---
+
+## Transcription engines
+
+Chosen per run in the Options panel.
+
+| | Runs where | Speakers | Needs |
+| --- | --- | --- | --- |
+| **Local Whisper** | your machine | pyannote, separately | faster-whisper; a HuggingFace token for speakers |
+| **Gemini 3.5 Transcribe** | Google | in the same pass | a Google AI key — the same one AI Cleanup uses |
+| **ElevenLabs Scribe** | ElevenLabs | in the same pass | an ElevenLabs key |
+
+Only the local engine gets the [audio pipeline](#what-it-does) in front of it. Denoising still
+applies to all three — the enhanced audio is what gets uploaded — but VAD and vocabulary biasing
+are decoder-side, and the cloud APIs do not expose those controls.
+
+### Gemini 3.5 Transcribe
+
+Two modes, and they are not two flavours of the same thing:
+
+| Mode | What you get |
+| --- | --- |
+| **Verbatim** (default) | Speaker labels and word-level timestamps, every word as spoken — fillers included. The only mode that fills in this app's data model, so subtitles and per-line times work. |
+| **Smart** | One block of punctuated, capitalised prose. **No speaker labels and no timestamps** — the API rejects both parameters in this mode, so `.srt` and `.vtt` come out with zero timings. |
+
+Verbatim plus AI Cleanup is the pairing to use: get every word down, then tidy. The app warns in
+the job log if you pick smart while speaker detection is on.
+
+Two more constraints worth knowing, both found by asking the API rather than reading the docs:
+
+- **Vocabulary biasing is unavailable here.** Google's `custom_vocabulary` is rejected outright
+  alongside either diarization or timestamps, and this app needs both. Terms are not silently
+  dropped — the Options panel says so where the setting lives.
+- **Length limits.** Google documents 60 minutes per request, or 30 with speaker separation.
+  Longer recordings are still sent, with a warning in the log first.
 
 ---
 

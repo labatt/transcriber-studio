@@ -8,6 +8,10 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Gemini 3.5 Transcribe** as a third transcription engine, alongside local Whisper and ElevenLabs
+  Scribe. It transcribes and separates speakers in one pass and uses the same Google AI key as AI
+  Cleanup. Verbatim mode is the default because it is the only one Google lets return speakers and
+  timestamps; smart mode returns prose and the app says so rather than producing empty timings.
 - **An installer.** `install.ps1` (Windows) and `install.sh` (macOS/Linux) find or install a
   suitable Python and hand over to `install.py`, which detects the OS, package manager, GPU and
   driver, then checks each requirement's version and installs or upgrades only what is missing.

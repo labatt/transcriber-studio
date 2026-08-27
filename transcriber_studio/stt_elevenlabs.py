@@ -37,13 +37,6 @@ READ_TIMEOUT = 1800         # a long recording can take minutes to come back
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 3
 
-# Segment shaping. Scribe hands back words; these bounds turn them back into
-# readable turns without cutting mid-sentence.
-GAP_SECONDS = 2.0           # a silence this long ends the turn
-SOFT_SECONDS, SOFT_CHARS = 30.0, 420    # break here at the next sentence end
-HARD_SECONDS, HARD_CHARS = 60.0, 900    # break here regardless
-SENTENCE_END = (".", "!", "?", "…")
-
 # Scribe reports ISO-639-3; the rest of the app shows the 639-1 codes Whisper
 # uses. Anything unlisted passes through as-is.
 _LANG_3_TO_1 = {
@@ -161,77 +154,24 @@ def _post(audio_path: str, api_key: str, fields: dict[str, str], log, should_can
 
 
 # ---- response -> segments ---------------------------------------------
-def _speaker_map(words: list[dict]) -> dict[str, str]:
-    """Scribe's speaker_0/1/… become Speaker 1/2/… in order of first speech."""
-    order: list[str] = []
-    for w in words:
-        sid = w.get("speaker_id")
-        if w.get("type") == "word" and sid and sid not in order:
-            order.append(sid)
-    return {sid: f"Speaker {i + 1}" for i, sid in enumerate(order)}
-
-
-def _should_break(text: str, start: float, end: float, word: dict) -> bool:
-    duration = end - start
-    if duration >= HARD_SECONDS or len(text) >= HARD_CHARS:
-        return True
-    if float(word.get("start", end)) - end >= GAP_SECONDS:
-        return True
-    if (duration >= SOFT_SECONDS or len(text) >= SOFT_CHARS) and text.rstrip().endswith(SENTENCE_END):
-        return True
-    return False
-
-
-def words_to_segments(words: list[dict], diarized: bool) -> tuple[list[Segment], list[str]]:
-    """Group Scribe's word list into speaker turns.
-
-    A turn ends when the speaker changes, when the silence between words is
-    long enough to read as a pause, or when the text has simply run long —
-    preferring a sentence boundary before forcing the break.
-    """
-    mapping = _speaker_map(words) if diarized else {}
-    segments: list[Segment] = []
-    text = ""
-    start = end = 0.0
-    speaker: str | None = None
-    open_seg = False
-
-    def flush():
-        nonlocal text, open_seg
-        cleaned = text.strip()
-        if cleaned:
-            segments.append(Segment(start=start, end=end, text=cleaned, speaker=speaker))
-        text = ""
-        open_seg = False
-
-    for word in words:
-        kind = word.get("type", "word")
-        content = word.get("text", "")
-        if kind == "spacing":
-            if open_seg:
-                text += content or " "
-            continue
-        who = mapping.get(word.get("speaker_id") or "") if diarized else None
-        w_start = float(word.get("start", end))
-        w_end = float(word.get("end", w_start))
-        if open_seg and (who != speaker or _should_break(text, start, end, word)):
-            flush()
-        if not open_seg:
-            start, speaker, open_seg = w_start, who, True
-            text = ""
-        text += content
-        end = w_end
-    flush()
-
-    speakers = list(dict.fromkeys(s.speaker for s in segments if s.speaker))
-    return segments, speakers
+# Shared with the Gemini engine: both hand back words, and both need the same
+# answer to "where does a turn end?".
+from .word_segments import (  # noqa: E402,F401  (re-exported for callers and tests)
+    GAP_SECONDS,
+    HARD_CHARS,
+    HARD_SECONDS,
+    SENTENCE_END,
+    SOFT_CHARS,
+    SOFT_SECONDS,
+    words_to_segments,
+)
 
 
 def _language(code: str) -> str:
+    """Scribe reports ISO-639-3; the app shows the 639-1 codes Whisper uses."""
     return _LANG_3_TO_1.get((code or "").lower(), code or "")
 
 
-# ---- entry point ------------------------------------------------------
 def transcribe(
     recording: Recording,
     audio_path: str,

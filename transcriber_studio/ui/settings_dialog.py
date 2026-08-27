@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import ai_providers, denoise, diarization, stt_elevenlabs, whisper_models
+from .. import ai_providers, denoise, diarization, stt_elevenlabs, stt_gemini, whisper_models
 from ..config import Settings
 from ..hardware import (
     CUDA_TORCH_INSTALL_CMD,
@@ -140,6 +140,49 @@ class SettingsDialog(SheetDialog):
         el_note.setStyleSheet("color: gray;")
         elf.addRow(el_note)
         layout.addWidget(el)
+
+        # --- Gemini transcription ---
+        # The key lives in the AI providers group below: it is the same Google
+        # account, and asking for it twice would be a trap.
+        gem = QGroupBox("Gemini 3.5 Transcribe (cloud engine)")
+        gemf = QFormLayout(gem)
+        self.gemini_model = QComboBox()
+        self.gemini_model.addItems(stt_gemini.MODELS)
+        self.gemini_model.setCurrentText(settings.gemini_model or stt_gemini.DEFAULT_MODEL)
+        gemf.addRow("Model:", self.gemini_model)
+
+        self.gemini_mode = QComboBox()
+        for mode in stt_gemini.MODES:
+            self.gemini_mode.addItem(stt_gemini.MODE_LABELS[mode], mode)
+        idx = self.gemini_mode.findData(settings.gemini_mode or stt_gemini.DEFAULT_MODE)
+        self.gemini_mode.setCurrentIndex(idx if idx >= 0 else 0)
+        self.gemini_mode.setToolTip(
+            "Verbatim is the one that gives you speakers and timestamps — Google's "
+            "API refuses both in smart mode, which returns one block of punctuated "
+            "prose. Verbatim keeps the fillers; AI Cleanup is where tidying belongs."
+        )
+        gemf.addRow("Transcription mode:", self.gemini_mode)
+
+        gem_row = QHBoxLayout()
+        gem_row.setContentsMargins(0, 0, 0, 0)
+        self.gemini_test = QPushButton("Test key and model access")
+        self.gemini_test.clicked.connect(self._test_gemini)
+        gem_row.addWidget(self.gemini_test)
+        gem_row.addStretch()
+        gemf.addRow(self._wrap(gem_row))
+
+        gem_note = WrappedNote(
+            "Choose this engine in the Options panel. It uses the Google AI key from "
+            "the AI providers section below — the same one AI Cleanup uses. It "
+            "transcribes and separates speakers in one pass, so the pyannote settings "
+            "do not apply to it. Google documents a 60 minute limit per request, or 30 "
+            "with speaker separation. Vocabulary biasing is not available on this "
+            "engine: the API refuses a custom vocabulary alongside speakers or "
+            "timestamps."
+        )
+        gem_note.setStyleSheet("color: gray;")
+        gemf.addRow(gem_note)
+        layout.addWidget(gem)
 
         # --- Whisper engine ---
         eng = QGroupBox("Whisper engine (local — faster-whisper)")
@@ -542,6 +585,22 @@ class SettingsDialog(SheetDialog):
         self._test_worker.finished.connect(lambda: self._set_test_buttons_enabled(True))
         self._test_worker.start()
 
+    def _test_gemini(self):
+        key = self._draft_settings().ai_key_google.strip()
+        if not key:
+            QMessageBox.warning(
+                self, "Test Gemini",
+                "Add a Google AI key in the AI providers section below first.",
+            )
+            return
+        self.gemini_test.setEnabled(False)
+        try:
+            QMessageBox.information(self, "Gemini", stt_gemini.test_key(key))
+        except Exception as exc:                       # noqa: BLE001 - shown to the user
+            QMessageBox.warning(self, "Gemini test failed", str(exc))
+        finally:
+            self.gemini_test.setEnabled(True)
+
     def _test_elevenlabs(self):
         if self._el_worker and self._el_worker.isRunning():
             QMessageBox.information(self, "Test ElevenLabs", "A test is already running.")
@@ -578,6 +637,8 @@ class SettingsDialog(SheetDialog):
         self.s.elevenlabs_api_key = self.el_key.text().strip()
         self.s.elevenlabs_model = self.el_model.currentText()
         self.s.elevenlabs_tag_audio_events = self.el_audio_events.isChecked()
+        self.s.gemini_model = self.gemini_model.currentText()
+        self.s.gemini_mode = self.gemini_mode.currentData() or stt_gemini.DEFAULT_MODE
         self.s.model = self.model.currentData() or self.s.model
         self.s.device = self.device.currentText()
         self.s.compute_type = self.compute.currentText()

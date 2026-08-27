@@ -202,6 +202,8 @@ def transcript_key(recording: Recording, opts: Any) -> str:
         # way round.
         str(getattr(opts, "engine", "local")),
         str(getattr(opts, "elevenlabs_model", "")),
+        str(getattr(opts, "gemini_model", "")),
+        str(getattr(opts, "gemini_mode", "")),
         str(opts.model),
         str(opts.language),
         str(opts.diarization_enabled),

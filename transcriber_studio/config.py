@@ -116,6 +116,15 @@ class Settings:
     elevenlabs_model: str = "scribe_v1"
     elevenlabs_tag_audio_events: bool = False   # mark laughter, applause, etc.
 
+    # --- Gemini (cloud STT; key stored locally only) ---
+    # Shares the Google AI key with AI Cleanup: it is the same account.
+    gemini_model: str = "gemini-3.5-transcribe"
+    # verbatim or smart. Not a style preference: smart mode returns prose with
+    # no speaker labels and no timestamps, because the API refuses both
+    # parameters there. Verbatim is the only mode that fills in the app's own
+    # data model, and pairs naturally with AI Cleanup for the tidying.
+    gemini_mode: str = "verbatim"
+
     # --- channels ---
     channel_mode: str = "downmix"   # downmix | per_channel
     channel_names: str = ""         # comma list e.g. "Agent,Customer"

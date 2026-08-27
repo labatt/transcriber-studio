@@ -10,17 +10,29 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 
-from . import audio_utils, diarization, stt_elevenlabs, vocab_bias, whisper_models
+from . import (
+    audio_utils,
+    diarization,
+    stt_elevenlabs,
+    stt_gemini,
+    vocab_bias,
+    whisper_models,
+)
 from .hardware import cuda_available
 from .job_cancel import JobCancelled, ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
 
 ENGINE_LOCAL = "local"
 ENGINE_ELEVENLABS = "elevenlabs"
+ENGINE_GEMINI = "gemini"
 ENGINE_LABELS = {
     ENGINE_LOCAL: "Local Whisper (faster-whisper)",
     ENGINE_ELEVENLABS: "ElevenLabs Scribe (cloud)",
+    ENGINE_GEMINI: "Gemini 3.5 Transcribe (cloud)",
 }
+#: Engines that transcribe and separate speakers in one pass, so pyannote and
+#: the HuggingFace token play no part.
+CLOUD_ENGINES = (ENGINE_ELEVENLABS, ENGINE_GEMINI)
 
 
 @dataclass
@@ -53,6 +65,9 @@ class TranscribeOptions:
     elevenlabs_api_key: str = ""
     elevenlabs_model: str = ""
     tag_audio_events: bool = False  # ElevenLabs only: mark laughter, applause…
+    gemini_api_key: str = ""        # the Google AI key, shared with AI Cleanup
+    gemini_model: str = ""
+    gemini_mode: str = ""           # smart | verbatim
 
 
 def faster_whisper_available() -> bool:
@@ -173,8 +188,8 @@ class Transcriber:
                 log_cb(msg)
 
         check_cancel(should_cancel, log, message="Cancelled.")
-        if opts.engine == ENGINE_ELEVENLABS:
-            return self._transcribe_elevenlabs(
+        if opts.engine in CLOUD_ENGINES:
+            return self._transcribe_cloud(
                 recording, audio_path, opts, progress_cb, log, should_cancel
             )
         device, compute = _resolve_device_compute(opts.device, opts.compute_type)
@@ -211,24 +226,30 @@ class Transcriber:
                 should_cancel,
             )
 
-    # ---- ElevenLabs Scribe --------------------------------------------
-    def _transcribe_elevenlabs(
+    # ---- cloud engines -------------------------------------------------
+    def _cloud_engine(self, engine: str):
+        """The module for a cloud engine. Both expose the same transcribe()."""
+        return stt_gemini if engine == ENGINE_GEMINI else stt_elevenlabs
+
+    def _transcribe_cloud(
         self, recording, audio_path, opts, progress_cb, log, should_cancel,
     ) -> TranscriptResult:
-        """Cloud transcription. Scribe diarizes in the same call, so pyannote
-        and the HuggingFace token play no part on this path."""
+        """Cloud transcription. These engines diarize in the same call, so
+        pyannote and the HuggingFace token play no part on this path."""
         if opts.channel_mode == "per_channel":
-            return self._elevenlabs_per_channel(
+            return self._cloud_per_channel(
                 recording, audio_path, opts, progress_cb, log, should_cancel
             )
-        return stt_elevenlabs.transcribe(
+        return self._cloud_engine(opts.engine).transcribe(
             recording, audio_path, opts, progress_cb, log, should_cancel
         )
 
-    def _elevenlabs_per_channel(
+    def _cloud_per_channel(
         self, recording, audio_path, opts, progress_cb, log, should_cancel,
     ) -> TranscriptResult:
         """One upload per channel, so channel == speaker as it does locally."""
+        engine = self._cloud_engine(opts.engine)
+        name = ENGINE_LABELS.get(opts.engine, opts.engine)
         log("Splitting channels…")
         channels = audio_utils.split_channels(audio_path, opts.channel_names or [])
         all_segments: list[Segment] = []
@@ -236,8 +257,8 @@ class Transcriber:
         n = len(channels)
         for i, (label, wav) in enumerate(channels):
             check_cancel(should_cancel, log, message="Cancelled — stopping transcription.")
-            log(f"Transcribing {label} with ElevenLabs…")
-            part = stt_elevenlabs.transcribe(
+            log(f"Transcribing {label} with {name}…")
+            part = engine.transcribe(
                 recording, wav, opts, None, log, should_cancel
             )
             language = language or part.language
@@ -253,8 +274,9 @@ class Transcriber:
             recording=recording,
             segments=all_segments,
             language=language,
-            model=stt_elevenlabs.model_label(
-                opts.elevenlabs_model or stt_elevenlabs.DEFAULT_MODEL
+            model=engine.model_label(
+                (opts.gemini_model if opts.engine == ENGINE_GEMINI
+                 else opts.elevenlabs_model) or engine.DEFAULT_MODEL
             ),
             speakers=speakers,
         )

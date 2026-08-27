@@ -117,6 +117,9 @@ class JobRunner:
             engine=self.s.stt_engine,
             elevenlabs_api_key=self.s.elevenlabs_api_key,
             elevenlabs_model=self.s.elevenlabs_model,
+            gemini_api_key=self.s.ai_key_google,
+            gemini_model=self.s.gemini_model,
+            gemini_mode=self.s.gemini_mode,
             tag_audio_events=self.s.elevenlabs_tag_audio_events,
         )
 
