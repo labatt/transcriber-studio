@@ -7,6 +7,11 @@ A desktop workbench that turns recordings into clean, speaker-labelled transcrip
 [![Tested on Windows 11 and Ubuntu](https://img.shields.io/badge/tested%20on-Windows%2011%20%7C%20Ubuntu%2024.04-0078d4.svg)](#platform-support)
 [![Tests](https://github.com/labatt/transcriber-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/labatt/transcriber-studio/actions/workflows/tests.yml)
 
+This started as a way to get usable transcripts out of my own [PLAUD](https://www.plaud.ai/)
+recordings — meetings and calls captured on a pocket recorder, which is exactly the audio most
+transcription tools handle worst. It imports straight from a PLAUD cloud account, and takes
+ordinary local audio files just as happily.
+
 Most transcription tools give you one knob: which model. On hard audio — a noisy room, a table
 mic, someone talking two tables over — the model is maybe a third of the result. This app is built
 around the other two thirds: **what happens to the audio before the decoder sees it**, and **what
@@ -14,9 +19,9 @@ the decoder is told to expect**.
 
 ![The main window](docs/screenshots/01-main-window.png)
 
-> ⚠️ **Windows 11 is the only platform this has been used in anger.** The test suite and the GUI
-> both run on Ubuntu 24.04, but no real transcription has been done there and macOS has never been
-> tried. See [Platform support](#platform-support) for the details.
+> ⚠️ **Windows 11 is the only platform this has done real work on.** The test suite and the GUI
+> both run on Ubuntu 24.04, but no actual transcription has been done there, and macOS has never
+> been tried. See [Platform support](#platform-support) for the details.
 
 > **Not affiliated with, endorsed by, or sponsored by PLAUD AI.** PLAUD is a trademark of its
 > respective owner. This is an independent tool that can import from PLAUD cloud recorders using
