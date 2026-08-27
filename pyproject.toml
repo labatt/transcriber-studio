@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcriber-studio"
+version = "0.1.0"
+description = "A local transcription workbench: denoise, VAD and vocabulary biasing in front of Whisper, with diarization, glossaries and an optional LLM cleanup pass."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Chris Labatt-Simon" }]
+keywords = [
+    "transcription", "whisper", "speech-to-text", "diarization",
+    "denoising", "deepfilternet", "plaud", "asr",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+# The floor. Everything that is optional lives in an extra below, because a
+# first install should not drag in two gigabytes of CUDA to open a window.
+dependencies = [
+    "PySide6>=6.6",
+    "requests>=2.31",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+# The local Whisper engine. Skip it if you only use ElevenLabs Scribe.
+local = [
+    "faster-whisper>=1.1",
+    "nvidia-cublas-cu12; sys_platform == 'win32'",
+]
+# Local speaker diarization. Needs a HuggingFace token and accepted model
+# licences; see the README. Install a CUDA build of torch first if you have a
+# GPU — see docs/gpu.md, since pip's default torch is the CPU one.
+diarization = [
+    "pyannote.audio>=4.0",
+    "torch>=2.8",
+    "torchaudio>=2.8",
+    "torchcodec>=0.7",
+]
+# The DeepFilterNet denoiser as a Python package. Its wheels lag new Python
+# releases; on a Python it does not support, install the standalone
+# `deep-filter` binary instead (README → Denoising).
+denoise = ["deepfilternet>=0.5.6"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+all = [
+    "transcriber-studio[local,diarization,denoise]",
+]
+
+[project.urls]
+Homepage = "https://github.com/labatt/transcriber-studio"
+Repository = "https://github.com/labatt/transcriber-studio"
+Issues = "https://github.com/labatt/transcriber-studio/issues"
+Changelog = "https://github.com/labatt/transcriber-studio/blob/main/CHANGELOG.md"
+
+[project.gui-scripts]
+# A GUI entry point: on Windows this gets a launcher that does not open a
+# console window behind the app.
+transcriber-studio = "transcriber_studio.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["transcriber_studio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The offscreen Qt platform is set in tests/conftest.py, which runs before Qt
+# is imported — an ini setting would need the pytest-env plugin.
+filterwarnings = ["ignore::UserWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # long lines are checked by line-length, not this
+    "B008",  # Qt idioms construct in call args all the time
+    # Import order is load-bearing here, not cosmetic: warnings are silenced and
+    # the CUDA DLL directories are registered before torch or Qt is imported,
+    # and the Qt platform is chosen before Qt itself loads.
+    "E402",
+    # `self.x = QSpinBox(); self.x.setRange(...)` reads better as one line than
+    # two, and the UI files are full of it.
+    "E702",
+]

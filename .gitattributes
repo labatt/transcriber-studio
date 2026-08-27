@@ -1,0 +1,4 @@
+# Normalize line endings so a Windows checkout and a Linux CI run agree.
+* text=auto eol=lf
+*.png binary
+*.ico binary

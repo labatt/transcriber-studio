@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / assistants
+.idea/
+.vscode/
+.claude/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Never commit anything from a real run: transcripts and glossaries contain
+# what people actually said, and the settings file holds API keys.
+*.glossary.json
+settings.json
+queue.json
+history.json
+/out/
+/output/
+/transcripts/
+*.wav
+*.mp3
+*.m4a
+*.srt
+*.vtt
