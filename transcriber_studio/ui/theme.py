@@ -112,6 +112,58 @@ _ROLES = {
 }
 
 
+#: Grid, row and header colours for the jobs table. (light, dark) as everywhere
+#: else here — a table styled for one palette is a black slab on the other.
+_GRID = ("#c8ccd0", "#4a4a4a")
+_ROW = ("#ffffff", "#2b2b2b")
+_ROW_ALT = ("#f5f6f8", "#303030")
+_HEADER = ("#e9ecef", "#353535")
+_HEADER_TEXT = ("#1f2328", "#e0e0e0")
+
+
+def table_style() -> str:
+    """Stylesheet for the jobs table, in whichever theme is running.
+
+    Hardcoding the dark values was invisible on the machine this was built on
+    and a solid black rectangle on a light desktop.
+    """
+    return f"""
+QTableWidget {{
+    gridline-color: {_color(_GRID)};
+    background-color: {_color(_ROW)};
+    alternate-background-color: {_color(_ROW_ALT)};
+}}
+QTableWidget::item {{
+    padding: 5px 8px;
+}}
+QHeaderView::section {{
+    background-color: {_color(_HEADER)};
+    color: {_color(_HEADER_TEXT)};
+    padding: 6px 8px;
+    border: 1px solid {_color(_GRID)};
+    font-weight: bold;
+}}
+"""
+
+
+def progress_style() -> str:
+    """Stylesheet for a queue row's progress bar."""
+    return f"""
+QProgressBar {{
+    border: 1px solid {_color(_GRID)};
+    border-radius: 4px;
+    text-align: center;
+    min-height: 20px;
+    max-height: 22px;
+    padding: 0 4px;
+}}
+QProgressBar::chunk {{
+    background-color: #42a5f5;
+    border-radius: 3px;
+}}
+"""
+
+
 def qcolor(role: str) -> QColor:
     """Palette-aware colour for an item view, by status role."""
     return QColor(_color(_ROLES.get(role, _MUTED)))

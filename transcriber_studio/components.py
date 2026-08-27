@@ -434,7 +434,7 @@ def can_elevate() -> bool:
     privilege-escalation path nobody has run is not something to ship — the UI
     shows the command to run by hand instead.
     """
-    return sys.platform == "win32"
+    return _platform_key() == "win32"
 
 
 #: Fragments Windows and pip use when the answer is "you may not write there".
@@ -498,7 +498,13 @@ SYSTEM_PACKAGES: dict[str, dict[str, tuple[str, list[str], list[str]]]] = {
 
 
 def _platform_key() -> str:
-    """sys.platform, collapsed to the three families the tables key on."""
+    """sys.platform, collapsed to the three families the tables key on.
+
+    Every platform decision in this module goes through here, so a test can
+    ask "what would this do on macOS?" by replacing one function. Patching
+    ``sys.platform`` itself is not the same thing: the standard library reads
+    it too, and shutil.which promptly tries to call into _winapi.
+    """
     if sys.platform.startswith("linux"):
         return "linux"
     return sys.platform

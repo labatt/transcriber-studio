@@ -156,6 +156,25 @@ class OptionsPanel(QWidget):
             "Audio kept either side of each speech run (ms), so the first and "
             "last syllable are not clipped."
         )
+        self.vad_min_speech = QSpinBox()
+        self.vad_min_speech.setRange(0, 5_000)
+        self.vad_min_speech.setSingleStep(50)
+        self.vad_min_speech.setValue(settings.vad_min_speech_ms)
+        self.vad_min_speech.setToolTip(
+            "Speech runs shorter than this (ms) are discarded. Raise it to drop "
+            "coughs and door clicks the detector counts as speech; 0 keeps "
+            "everything it finds."
+        )
+        self.vad_max_speech = QDoubleSpinBox()
+        self.vad_max_speech.setRange(0.0, 3_600.0)
+        self.vad_max_speech.setSingleStep(30.0)
+        self.vad_max_speech.setDecimals(0)
+        self.vad_max_speech.setValue(settings.vad_max_speech_s)
+        self.vad_max_speech.setToolTip(
+            "Force a split after this many seconds of unbroken speech. 0 means "
+            "no cap, which is right unless a monologue is running the decoder "
+            "out of context."
+        )
         for label, widget in (
             ("Threshold", self.vad_threshold),
             ("Silence ms", self.vad_min_silence),
@@ -165,6 +184,16 @@ class OptionsPanel(QWidget):
             vad_row.addWidget(widget)
         vad_row.addStretch()
         pf.addRow(self._wrap(vad_row))
+
+        vad_row2 = QHBoxLayout()
+        for label, widget in (
+            ("Min speech ms", self.vad_min_speech),
+            ("Max speech s", self.vad_max_speech),
+        ):
+            vad_row2.addWidget(QLabel(label))
+            vad_row2.addWidget(widget)
+        vad_row2.addStretch()
+        pf.addRow(self._wrap(vad_row2))
 
         self.vad_status = QLabel("")
         self.vad_status.setWordWrap(True)
@@ -188,6 +217,19 @@ class OptionsPanel(QWidget):
         self.bias_terms.setMaximumHeight(64)
         self.bias_terms.textChanged.connect(self._update_pipeline_status)
         pf.addRow("Extra vocabulary:", self.bias_terms)
+
+        self.bias_budget = QSpinBox()
+        self.bias_budget.setRange(0, 850)
+        self.bias_budget.setSingleStep(50)
+        self.bias_budget.setValue(settings.bias_max_chars)
+        self.bias_budget.setToolTip(
+            "How many characters of vocabulary to hand the decoder. Whisper "
+            "truncates a longer prompt silently, so terms past the budget are "
+            "dropped from the end of the list — which is why the most valuable "
+            "ones go first."
+        )
+        self.bias_budget.valueChanged.connect(self._update_pipeline_status)
+        pf.addRow("Vocabulary budget:", self.bias_budget)
 
         self.bias_status = QLabel("")
         self.bias_status.setWordWrap(True)
@@ -480,9 +522,14 @@ class OptionsPanel(QWidget):
         denoise_on = self.denoise_on.isChecked()
         self.denoise_backend.setEnabled(denoise_on)
         vad_on = self.vad_on.isChecked()
-        for widget in (self.vad_threshold, self.vad_min_silence, self.vad_pad):
+        for widget in (
+            self.vad_threshold, self.vad_min_silence, self.vad_pad,
+            self.vad_min_speech, self.vad_max_speech,
+        ):
             widget.setEnabled(vad_on)
-        self.bias_terms.setEnabled(self.bias_on.isChecked())
+        bias_on = self.bias_on.isChecked()
+        self.bias_terms.setEnabled(bias_on)
+        self.bias_budget.setEnabled(bias_on)
         self._update_pipeline_status()
 
     def _update_pipeline_status(self, *_args):
@@ -515,6 +562,9 @@ class OptionsPanel(QWidget):
         draft.vad_threshold = self.vad_threshold.value()
         draft.vad_min_silence_ms = self.vad_min_silence.value()
         draft.vad_speech_pad_ms = self.vad_pad.value()
+        draft.vad_min_speech_ms = self.vad_min_speech.value()
+        draft.vad_max_speech_s = self.vad_max_speech.value()
+        draft.bias_max_chars = self.bias_budget.value()
         draft.bias_enabled = self.bias_on.isChecked()
         draft.bias_extra_terms = self.bias_terms.toPlainText()
         draft.glossary_shared_id = self.shared_glossary.currentData() or ""
@@ -658,6 +708,9 @@ class OptionsPanel(QWidget):
         s.vad_threshold = self.vad_threshold.value()
         s.vad_min_silence_ms = self.vad_min_silence.value()
         s.vad_speech_pad_ms = self.vad_pad.value()
+        s.vad_min_speech_ms = self.vad_min_speech.value()
+        s.vad_max_speech_s = self.vad_max_speech.value()
+        s.bias_max_chars = self.bias_budget.value()
         s.bias_enabled = self.bias_on.isChecked()
         s.bias_extra_terms = self.bias_terms.toPlainText().strip()
         s.hallucination_guard = self.hallucination_guard.isChecked()

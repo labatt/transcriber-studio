@@ -4,7 +4,7 @@ A desktop workbench that turns recordings into clean, speaker-labelled transcrip
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tested on Windows](https://img.shields.io/badge/tested%20on-Windows%2011-0078d4.svg)](#platform-support)
+[![Tested on Windows 11 and Ubuntu](https://img.shields.io/badge/tested%20on-Windows%2011%20%7C%20Ubuntu%2024.04-0078d4.svg)](#platform-support)
 [![Tests](https://github.com/labatt/transcriber-studio/actions/workflows/tests.yml/badge.svg)](https://github.com/labatt/transcriber-studio/actions/workflows/tests.yml)
 
 Most transcription tools give you one knob: which model. On hard audio — a noisy room, a table
@@ -14,9 +14,9 @@ the decoder is told to expect**.
 
 ![The main window](docs/screenshots/01-main-window.png)
 
-> ⚠️ **I have only tested this on Windows 11.** It is written to be cross-platform and the test
-> suite runs on Linux in CI, but I have never run the app on macOS or Linux. See
-> [Platform support](#platform-support) for exactly what is Windows-specific.
+> ⚠️ **Windows 11 is the only platform this has been used in anger.** The test suite and the GUI
+> both run on Ubuntu 24.04, but no real transcription has been done there and macOS has never been
+> tried. See [Platform support](#platform-support) for the details.
 
 > **Not affiliated with, endorsed by, or sponsored by PLAUD AI.** PLAUD is a trademark of its
 > respective owner. This is an independent tool that can import from PLAUD cloud recorders using
@@ -87,9 +87,9 @@ there is no configuration that quietly does nothing.
 
 | | Status |
 | --- | --- |
-| **Windows 10/11** | **Tested.** This is where it is developed and used daily. |
-| Linux | Unverified. The test suite passes in CI; the app has never been launched. |
-| macOS | Unverified, and no CUDA — Whisper would be CPU-only (CTranslate2 has no Metal backend). |
+| **Windows 10/11** | **Used daily.** Where it is developed, and the only place real recordings have gone through it. |
+| **Ubuntu 24.04** | **Runs.** Full test suite passes, and the GUI has been launched and rendered under Wayland (WSL2/WSLg). No transcription has actually been run, and no NVIDIA GPU was exercised. |
+| macOS | **Never tried.** Nothing in the code should stop it, and there is no CUDA there — Whisper would be CPU-only, since CTranslate2 has no Metal backend. |
 
 What is genuinely Windows-specific, all of it guarded so nothing crashes elsewhere:
 
@@ -101,8 +101,10 @@ What is genuinely Windows-specific, all of it guarded so nothing crashes elsewhe
   your platform.
 
 Package installs are platform-aware (`winget` / `brew` / `apt-get`), and the data directory follows
-each platform's convention. If you run it on macOS or Linux, an issue saying what broke would be
-genuinely useful.
+each platform's convention — `%APPDATA%`, `$XDG_CONFIG_HOME`, or `~/Library/Application Support`.
+Running on Linux is what turned up the last two portability bugs (a queue table hardcoded to dark
+colours, and three tests that only passed on Windows), so if you use it on macOS or Linux, an
+issue saying what broke would be genuinely useful.
 
 ---
 

@@ -41,10 +41,12 @@ from .. import (
     ai_providers,
     audio_utils,
     config,
+    denoise,
     diarization,
     filename_builder,
     hf_client,
     stt_elevenlabs,
+    vad,
     whisper_models,
 )
 from ..config import Settings
@@ -575,6 +577,107 @@ class SpeakersPage(_Page):
         s.max_speakers = self.maxspk.value()
 
 
+# --------------------------------------------------------------- pipeline
+class PipelinePage(_Page):
+    """The three layers in front of the decoder.
+
+    Worth its own page rather than a line in Options: on hard audio these
+    matter more than the model choice, and a first-run user who never finds
+    them judges the app on its worst output.
+    """
+
+    def __init__(self, draft, parent=None):
+        super().__init__(draft, parent)
+        self.setTitle("Audio pipeline")
+        self.setSubTitle(
+            "What happens to the audio before the decoder sees it. On difficult "
+            "recordings this is worth more than a bigger model."
+        )
+        layout = QVBoxLayout(self)
+
+        self.denoise = QCheckBox("Denoise the audio first")
+        self.denoise.setChecked(draft.denoise_enabled)
+        self.denoise.toggled.connect(self._update)
+        layout.addWidget(self.denoise)
+
+        row = QHBoxLayout()
+        self.df_path = QLineEdit(draft.deep_filter_path)
+        self.df_path.setPlaceholderText("Path to the deep-filter binary (optional)")
+        self.df_path.textChanged.connect(self._update)
+        browse = QPushButton("Browse…")
+        browse.setAutoDefault(False)
+        browse.clicked.connect(self._browse)
+        row.addWidget(self.df_path, stretch=1)
+        row.addWidget(browse)
+        layout.addLayout(row)
+
+        self.denoise_note = QLabel()
+        self.denoise_note.setWordWrap(True)
+        self.denoise_note.setStyleSheet(muted())
+        layout.addWidget(self.denoise_note)
+
+        self.vad = QCheckBox("Skip silence and non-speech (voice activity detection)")
+        self.vad.setChecked(draft.vad_enabled)
+        self.vad.toggled.connect(self._update)
+        layout.addWidget(self.vad)
+
+        self.vad_note = QLabel()
+        self.vad_note.setWordWrap(True)
+        self.vad_note.setStyleSheet(muted())
+        layout.addWidget(self.vad_note)
+
+        self.bias = QCheckBox("Tell the decoder which names and terms to expect")
+        self.bias.setChecked(draft.bias_enabled)
+        self.bias.toggled.connect(self._update)
+        layout.addWidget(self.bias)
+
+        self.guard = QCheckBox("Guard against hallucinated passages")
+        self.guard.setChecked(draft.hallucination_guard)
+        layout.addWidget(self.guard)
+
+        self.bias_note = QLabel(
+            "Vocabulary comes from the shared glossary a job uses, so it fills "
+            "itself in as you go: what one recording teaches the app, the next "
+            "one already knows."
+        )
+        self.bias_note.setWordWrap(True)
+        self.bias_note.setStyleSheet(muted())
+        layout.addWidget(self.bias_note)
+        layout.addStretch()
+
+    def initializePage(self):
+        self._update()
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Locate the deep-filter binary", self.df_path.text(),
+            "Programs (*.exe);;All files (*)",
+        )
+        if path:
+            self.df_path.setText(path)
+
+    def _draft_now(self) -> Settings:
+        """The settings as this page currently shows them."""
+        draft = Settings(**self.draft.to_dict())
+        draft.denoise_enabled = self.denoise.isChecked()
+        draft.deep_filter_path = self.df_path.text().strip()
+        draft.vad_enabled = self.vad.isChecked()
+        return draft
+
+    def _update(self, _checked: bool = False):
+        on = self.denoise.isChecked()
+        self.df_path.setEnabled(on)
+        self.denoise_note.setText(denoise.describe(self._draft_now()))
+        self.vad_note.setText(vad.describe(self._draft_now()))
+
+    def apply_to(self, s: Settings) -> None:
+        s.denoise_enabled = self.denoise.isChecked()
+        s.deep_filter_path = self.df_path.text().strip()
+        s.vad_enabled = self.vad.isChecked()
+        s.bias_enabled = self.bias.isChecked()
+        s.hallucination_guard = self.guard.isChecked()
+
+
 # --------------------------------------------------------------- AI clean
 class CleanupPage(_Page):
     def __init__(self, draft, parent=None):
@@ -812,7 +915,8 @@ class FinishPage(_Page):
 # ----------------------------------------------------------------- wizard
 class SetupWizard(QWizard):
     PAGE_WELCOME, PAGE_PLAUD, PAGE_ENGINE, PAGE_KEYS = 0, 1, 2, 3
-    PAGE_SPEAKERS, PAGE_CLEANUP, PAGE_OUTPUT, PAGE_FINISH = 4, 5, 6, 7
+    PAGE_SPEAKERS, PAGE_PIPELINE, PAGE_CLEANUP = 4, 5, 6
+    PAGE_OUTPUT, PAGE_FINISH = 7, 8
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -829,6 +933,7 @@ class SetupWizard(QWizard):
             EnginePage(self.draft, self),
             KeysPage(self.draft, self),
             SpeakersPage(self.draft, self),
+            PipelinePage(self.draft, self),
             CleanupPage(self.draft, self),
             OutputPage(self.draft, self),
             FinishPage(self.draft, self),

@@ -50,8 +50,10 @@ probably in the wrong place.
 
 ## Things worth doing
 
-- **macOS support.** Untested. The Components window assumes `winget`, and the data directory
-  assumes `%APPDATA%`.
+- **macOS support.** Never launched there. The platform-specific pieces have macOS branches
+  (`brew`, `~/Library/Application Support`) but nobody has run them.
+- **Linux in earnest.** The suite and the GUI both run on Ubuntu 24.04, but no real transcription
+  has been done, and the NVIDIA path has never been exercised outside Windows.
 - **Batched inference.** faster-whisper ships `BatchedInferencePipeline`; the app does not use it
   yet, and it is the obvious speedup.
 - **A denoiser that is not Windows-first.** The `deep-filter` binary exists for Linux and macOS;

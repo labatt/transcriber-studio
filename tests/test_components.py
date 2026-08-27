@@ -9,9 +9,12 @@ import sys
 from transcriber_studio import components as C
 from transcriber_studio.components import MISSING, OUTDATED, UNKNOWN, UP_TO_DATE
 
-VENV_DIR = r"C:env\Scripts"
-PY_EXE = r"C:\py.exe"
-LOG_PATH = r"C:\log.txt"
+#: Windows paths for the command-building tests. Assembled from parts so that
+#: no escape sequence can eat the separator — one of these spent a while
+#: containing a literal vertical tab and silently comparing equal to its typo.
+SEP = chr(92)
+PY_EXE = "C:" + SEP + "py.exe"
+LOG_PATH = "C:" + SEP + "log.txt"
 
 
 # ---- comparing versions ------------------------------------------------
@@ -91,7 +94,9 @@ def test_a_cpu_torch_stays_on_pypi_but_still_moves_as_a_set(monkeypatch):
     assert cmd[-3:] == ["torchvision", "torchaudio", "torchcodec"]
 
 
-def test_npm_and_winget_components_get_their_own_commands():
+def test_npm_and_winget_components_get_their_own_commands(monkeypatch):
+    monkeypatch.setattr(C, "_platform_key", lambda: "win32")
+
     assert C.update_command(C.BY_KEY["plaud"])[1:] == [
         "install", "-g", "@plaud-ai/cli@latest"
     ]
@@ -100,8 +105,10 @@ def test_npm_and_winget_components_get_their_own_commands():
     ]
 
 
-def test_winget_never_waits_for_a_prompt_nobody_can_answer():
+def test_winget_never_waits_for_a_prompt_nobody_can_answer(monkeypatch):
     """An interactive winget behind a piped stdout hangs until it is killed."""
+    monkeypatch.setattr(C, "_platform_key", lambda: "win32")
+
     cmd = C.update_command(C.BY_KEY["ffmpeg"])
 
     assert "--disable-interactivity" in cmd
@@ -161,14 +168,22 @@ def test_scanning_without_the_network_asks_no_index(monkeypatch):
 
 
 def test_refreshing_path_only_ever_adds(monkeypatch):
-    """An activated virtualenv lives on PATH and nowhere else."""
+    """An activated virtualenv lives on PATH and nowhere else.
+
+    Holds on every platform: off Windows there is no registry to read and the
+    call is a no-op, which satisfies "only ever adds" trivially.
+    """
     import os
 
-    monkeypatch.setenv("PATH", r"C:env\Scripts" + os.pathsep + r"C:\Windows")
+    # No drive letters here: a colon is the path separator on POSIX, so a
+    # Windows-shaped fixture splits into pieces the moment this runs on Linux.
+    before = [os.path.join("fake-venv", "Scripts"), "somewhere-else"]
+    monkeypatch.setenv("PATH", os.pathsep.join(before))
+
     added = C.refresh_path()
 
     entries = os.environ["PATH"].split(os.pathsep)
-    assert entries[0] == r"C:env\Scripts"
+    assert entries[: len(before)] == before      # nothing removed or reordered
     assert all(entry in entries for entry in added)
 
 
@@ -307,7 +322,7 @@ def test_ffmpeg_is_installed_with_each_platforms_own_package_manager(monkeypatch
         ("darwin", "brew", "install"),
         ("linux", "apt-get", "install"),
     ):
-        monkeypatch.setattr(C.sys, "platform", platform)
+        monkeypatch.setattr(C, "_platform_key", lambda p=platform: p)
         monkeypatch.setattr(C, "executable", lambda name: name)
         cmd = C.install_command(ffmpeg)
         assert cmd[0] == manager, platform
@@ -316,7 +331,7 @@ def test_ffmpeg_is_installed_with_each_platforms_own_package_manager(monkeypatch
 
 def test_a_platform_with_no_package_manager_entry_gets_no_command(monkeypatch):
     """Better to show the download page than a command that does not exist here."""
-    monkeypatch.setattr(C.sys, "platform", "freebsd14")
+    monkeypatch.setattr(C, "_platform_key", lambda: "freebsd14")
 
     assert C.install_command(C.BY_KEY["ffmpeg"]) == []
     assert C.BY_KEY["ffmpeg"].url        # …which is what the UI falls back to
@@ -324,11 +339,11 @@ def test_a_platform_with_no_package_manager_entry_gets_no_command(monkeypatch):
 
 def test_only_windows_offers_to_elevate_a_command_itself(monkeypatch):
     """An untested privilege-escalation path is not something to ship."""
-    monkeypatch.setattr(C.sys, "platform", "win32")
+    monkeypatch.setattr(C, "_platform_key", lambda: "win32")
     assert C.can_elevate()
 
     for platform in ("darwin", "linux"):
-        monkeypatch.setattr(C.sys, "platform", platform)
+        monkeypatch.setattr(C, "_platform_key", lambda p=platform: p)
         assert not C.can_elevate(), platform
 
 
@@ -336,16 +351,16 @@ def test_apt_is_known_to_need_root_where_brew_and_winget_do_not(monkeypatch):
     monkeypatch.setattr(C, "is_elevated", lambda: False)
     ffmpeg = C.BY_KEY["ffmpeg"]
 
-    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.setattr(C, "_platform_key", lambda: "linux")
     assert C.needs_elevation(ffmpeg)
 
     for platform in ("darwin", "win32"):
-        monkeypatch.setattr(C.sys, "platform", platform)
+        monkeypatch.setattr(C, "_platform_key", lambda p=platform: p)
         assert not C.needs_elevation(ffmpeg), platform
 
 
 def test_refresh_path_is_a_windows_concern_and_no_op_elsewhere(monkeypatch):
-    monkeypatch.setattr(C.sys, "platform", "linux")
+    monkeypatch.setattr(C, "_platform_key", lambda: "linux")
     assert C.refresh_path() == []
 
 

@@ -50,6 +50,7 @@ from ..jobs import (
 from ..models import Recording, Source
 from ..queue_store import clear_queue_file, load_queue, save_queue
 from ..workers import AccountWorker, CleanupWorker, DiarizationWorker, TranscriptionWorker
+from . import theme
 from .ai_cleanup_dialog import AICleanupDialog
 from .glossary_dialog import GlossaryLibraryDialog
 from .local_files_tab import LocalFilesTab
@@ -94,39 +95,6 @@ GPU_BADGE_OFF = (
     "QLabel#gpuBadge { background-color: #555; color: #ccc; font-weight: bold;"
     " padding: 4px 10px; border-radius: 5px; }"
 )
-
-QUEUE_TABLE_STYLE = """
-QTableWidget {
-    gridline-color: #4a4a4a;
-    background-color: #2b2b2b;
-    alternate-background-color: #303030;
-}
-QTableWidget::item {
-    padding: 5px 8px;
-}
-QHeaderView::section {
-    background-color: #353535;
-    color: #e0e0e0;
-    padding: 6px 8px;
-    border: 1px solid #4a4a4a;
-    font-weight: bold;
-}
-"""
-
-QUEUE_PROGRESS_STYLE = """
-QProgressBar {
-    border: 1px solid #555;
-    border-radius: 4px;
-    text-align: center;
-    min-height: 20px;
-    max-height: 22px;
-    padding: 0 4px;
-}
-QProgressBar::chunk {
-    background-color: #42a5f5;
-    border-radius: 3px;
-}
-"""
 
 OUTPUT_OPEN_BTN_STYLE = """
 QPushButton {
@@ -335,7 +303,7 @@ class MainWindow(QMainWindow):
         # jobs table
         self.queue = QTableWidget(0, len(QUEUE_COLS))
         self.queue.setHorizontalHeaderLabels(QUEUE_COLS)
-        self.queue.setStyleSheet(QUEUE_TABLE_STYLE)
+        self.queue.setStyleSheet(theme.table_style())
         self.queue.setShowGrid(True)
         self.queue.setGridStyle(Qt.PenStyle.SolidLine)
         self.queue.setAlternatingRowColors(True)
@@ -683,7 +651,7 @@ class MainWindow(QMainWindow):
         bar.setFormat("%p%")
         bar.setTextVisible(True)
         bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bar.setStyleSheet(QUEUE_PROGRESS_STYLE)
+        bar.setStyleSheet(theme.progress_style())
         return bar
 
     def _set_progress_cell(self, row: int) -> None:

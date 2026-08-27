@@ -47,9 +47,9 @@ def parse_owner_names(value: str) -> list[str]:
 def owner_forms(owner_names) -> tuple[set[str], set[str]]:
     """Split configured names into (first names, surname forms).
 
-    "Chris Labatt-Simon, Chris L, Chris" becomes first names {chris} and
-    surnames {labattsimon, l, ""} — so every spelling the user actually gets
-    labelled with is covered without listing each combination.
+    "Alex Ortiz-Cole, Alex O, Alex" becomes first names {alex} and surnames
+    {ortizcole, o, ""} — so every spelling the user actually gets labelled with
+    is covered without listing each combination.
     """
     if isinstance(owner_names, str):
         owner_names = parse_owner_names(owner_names)
