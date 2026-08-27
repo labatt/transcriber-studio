@@ -484,8 +484,11 @@ Two more constraints worth knowing, both found by asking the API rather than rea
 - **Vocabulary biasing is unavailable here.** Google's `custom_vocabulary` is rejected outright
   alongside either diarization or timestamps, and this app needs both. Terms are not silently
   dropped — the Options panel says so where the setting lives.
-- **Length limits.** Google documents 60 minutes per request, or 30 with speaker separation.
-  Longer recordings are still sent, with a warning in the log first.
+- **Length limits.** Google documents *"Standard unary requests support audio files up to 1 hour"*
+  and *"Audio processing is limited to 30 minutes when features like speaker diarization or
+  word-level timestamps are enabled"*. Since verbatim mode always asks for word timestamps, the
+  30-minute ceiling applies there whether or not speaker detection is on. Longer recordings are
+  still sent — the API is the authority — with a warning in the log first.
 
 ---
 

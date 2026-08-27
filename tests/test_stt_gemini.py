@@ -151,3 +151,30 @@ def test_mime_type_follows_the_file():
 def test_every_mode_has_a_label_the_ui_can_show():
     assert set(g.MODE_LABELS) == set(g.MODES)
     assert "no speakers" in g.MODE_LABELS["smart"]
+
+
+# ---- the documented length limits --------------------------------------
+
+
+def test_word_timestamps_alone_lower_the_length_ceiling():
+    """Google's wording is "diarization OR word-level timestamps", and verbatim
+    mode always asks for timestamps — so the lower limit applies even with
+    speaker detection off."""
+    config = g.build_config(TranscribeOptions(gemini_mode="verbatim",
+                                              diarization_enabled=False))
+
+    assert "diarization_mode" not in config["mode"]
+    assert g.length_ceiling(config) == g.MAX_MINUTES_WITH_FEATURES
+
+
+def test_speakers_also_lower_it():
+    config = g.build_config(TranscribeOptions(gemini_mode="verbatim",
+                                              diarization_enabled=True))
+
+    assert g.length_ceiling(config) == g.MAX_MINUTES_WITH_FEATURES
+
+
+def test_smart_mode_gets_the_full_hour():
+    config = g.build_config(TranscribeOptions(gemini_mode="smart"))
+
+    assert g.length_ceiling(config) == g.MAX_MINUTES_PLAIN == 60

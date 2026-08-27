@@ -69,10 +69,19 @@ STRUCTURED_MODES = ("verbatim",)
 
 #: The Files API's own ceiling. Well beyond anything this app will send.
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
-#: What Google documents for a single request. Longer recordings still get
-#: sent — the API is the authority — but the log warns first.
+#: What Google documents for a single request, quoting the Limitations section
+#: of https://ai.google.dev/gemini-api/docs/transcribe:
+#:
+#:   "Standard unary requests support audio files up to 1 hour."
+#:   "Audio processing is limited to 30 minutes when features like speaker
+#:    diarization or word-level timestamps are enabled."
+#:
+#: Note "or word-level timestamps": the lower ceiling applies in verbatim mode
+#: whether or not speakers were asked for, because that mode always requests
+#: word timings. Longer recordings are still sent — the API is the authority —
+#: but the log warns first.
 MAX_MINUTES_PLAIN = 60
-MAX_MINUTES_WITH_SPEAKERS = 30
+MAX_MINUTES_WITH_FEATURES = 30
 
 READ_TIMEOUT = 1800         # a long recording takes minutes to come back
 UPLOAD_TIMEOUT = 900
@@ -256,6 +265,19 @@ def build_config(opts) -> dict[str, Any]:
     return config
 
 
+def length_ceiling(config: dict[str, Any]) -> int:
+    """The documented per-request limit for a config, in minutes.
+
+    Keyed on what the request actually asks for rather than on diarization
+    alone: word timestamps drop the ceiling to 30 minutes by themselves, and
+    verbatim mode always asks for them.
+    """
+    mode = config.get("mode") or {}
+    if mode.get("diarization_mode") or mode.get("timestamp_granularities"):
+        return MAX_MINUTES_WITH_FEATURES
+    return MAX_MINUTES_PLAIN
+
+
 def _post_interaction(uri: str, mime: str, opts, api_key: str, log, should_cancel) -> dict:
     body = json.dumps({
         "model": (getattr(opts, "gemini_model", "") or DEFAULT_MODEL),
@@ -385,8 +407,8 @@ def transcribe(
         log("Gemini: smart mode cannot separate speakers — the transcript will be unlabelled.")
 
     minutes = (recording.duration_seconds or 0) / 60
-    ceiling = MAX_MINUTES_WITH_SPEAKERS if diarize else MAX_MINUTES_PLAIN
-    if minutes > ceiling:
+    if minutes > length_ceiling(config):
+        ceiling = length_ceiling(config)
         log(
             f"Gemini: this recording is {minutes:.0f} min and Google documents a "
             f"{ceiling} min limit for these settings — sending it anyway, but it may "
