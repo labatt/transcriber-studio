@@ -35,10 +35,8 @@ the decoder is told to expect**.
 - [Platform support](#platform-support)
 - [Requirements](#requirements)
 - [GPU vs. no GPU](#gpu-vs-no-gpu)
-- [Installation](#installation) — [Python](#1-python) · [the app](#2-the-app) ·
-  [ffmpeg](#3-ffmpeg-required) · [denoiser](#4-the-denoiser-recommended) ·
-  [GPU PyTorch](#5-pytorch-for-a-gpu-optional) · [diarization](#6-speaker-diarization-optional) ·
-  [PLAUD](#7-plaud-cloud-import-optional)
+- [Installation](#installation) — [the short way](#the-short-way) (one command) or
+  [the long way](#the-long-way) (per-OS, step by step)
 - [First run](#first-run)
 - [Your first transcription](#your-first-transcription)
 - [Getting better results on hard audio](#getting-better-results-on-hard-audio)
@@ -168,103 +166,155 @@ README: **on hard audio, denoise + VAD + biasing on `small` beats `large-v3` on 
 
 ## Installation
 
-Step by step, from nothing. Steps 1–3 are required; the rest are worth doing.
+### The short way
 
-### 1. Python
+Clone the repository and run the installer. It works out which OS you are on, checks what is
+already installed and at what version, installs or upgrades only what is missing, and tells you
+about anything it could not do.
 
-Install **Python 3.10 or newer** from [python.org](https://www.python.org/downloads/) and tick
-*Add python.exe to PATH*. Check it:
-
-```powershell
-python --version
-```
-
-### 2. The app
+**Windows** (PowerShell):
 
 ```powershell
 git clone https://github.com/labatt/transcriber-studio.git
 cd transcriber-studio
+.\install.ps1
+```
 
-python -m venv .venv
-.venv\Scripts\Activate.ps1        # PowerShell
-# .venv\Scripts\activate.bat      # cmd.exe
+**macOS and Linux**:
+
+```bash
+git clone https://github.com/labatt/transcriber-studio.git
+cd transcriber-studio
+./install.sh
+```
+
+It asks before each step and shows the exact command first, so nothing happens that you have not
+seen. Useful flags — they pass through to `install.py`, which you can also run directly if Python
+is already installed:
+
+| Flag | What it does |
+| --- | --- |
+| `--check` | Report what is installed and what is out of date. Changes nothing. |
+| `--dry-run` | Print every command it would run, without running any of them. |
+| `--yes` | Answer yes to everything, for a scripted setup. |
+| `--minimal` | Only what the app cannot run without. |
+| `--no-gpu` | Skip the CUDA PyTorch install even if a GPU is present. |
+
+The shell wrappers exist for one reason: `install.py` cannot install the Python it is running on.
+They find a suitable Python, install one if there is none, and hand over. Everything after that is
+the same script on all three platforms.
+
+What it handles: Python, ffmpeg (installing or upgrading), the app and its dependencies, the CUDA
+build of PyTorch on the right channel for your driver, pyannote, the DeepFilterNet binary for your
+platform, and the PLAUD CLI. Where there is no package manager, it downloads what it needs
+directly — on Windows with no winget, that means fetching a static ffmpeg build and putting it on
+your PATH.
+
+### The long way
+
+If you would rather do it by hand, or the installer could not finish a step, here is the same
+thing manually. Steps 1–3 are required; the rest are worth doing.
+
+#### 1. Python 3.10 or newer
+
+| | |
+| --- | --- |
+| **Windows** | `winget install Python.Python.3.13` — or [python.org](https://www.python.org/downloads/), ticking *Add python.exe to PATH* |
+| **macOS** | `brew install python@3.13` — or [python.org](https://www.python.org/downloads/) |
+| **Debian/Ubuntu** | `sudo apt install python3 python3-venv python3-pip` |
+| **Fedora** | `sudo dnf install python3 python3-pip` |
+| **Arch** | `sudo pacman -S python python-pip` |
+
+Check it: `python --version` (Windows) or `python3 --version`.
+
+> On Debian and Ubuntu, `python3-venv` is a separate package and its absence only shows up later
+> as a confusing pip error. Install it now.
+
+#### 2. The app
+
+```bash
+git clone https://github.com/labatt/transcriber-studio.git
+cd transcriber-studio
+
+python -m venv .venv                  # python3 on macOS/Linux
+.venv\Scripts\Activate.ps1            # Windows PowerShell
+# .venv\Scripts\activate.bat          # Windows cmd.exe
+# source .venv/bin/activate           # macOS/Linux
 
 pip install -e ".[local]"
 ```
 
 `[local]` brings in the local Whisper engine. Leave it off if you only intend to use ElevenLabs
-Scribe. Then:
+Scribe. Then `python run.py`. An installed copy also gets a `transcriber-studio` command, so you
+can make a shortcut to it.
 
-```powershell
-python run.py
-```
-
-An installed copy also gets a `transcriber-studio` command, so you can make a shortcut to it.
-
-### 3. ffmpeg (required)
+#### 3. ffmpeg (required)
 
 Everything decodes through ffmpeg, and it is also the fallback denoiser.
 
-```powershell
-winget install Gyan.FFmpeg
-```
+| | |
+| --- | --- |
+| **Windows** | `winget install Gyan.FFmpeg` — then **open a new terminal**, because winget edits PATH in the registry, not in your current session |
+| **macOS** | `brew install ffmpeg` |
+| **Debian/Ubuntu** | `sudo apt install ffmpeg` |
+| **Fedora** | `sudo dnf install ffmpeg` |
+| **Arch** | `sudo pacman -S ffmpeg` |
 
-Then **close and reopen your terminal** so PATH updates. Check it:
+Check it: `ffmpeg -version`.
 
-```powershell
-ffmpeg -version
-```
+#### 4. The denoiser (recommended)
 
-### 4. The denoiser (recommended)
-
-This is the single biggest accuracy win on difficult audio.
+The single biggest accuracy win on difficult audio.
 
 1. Go to the [DeepFilterNet releases page](https://github.com/Rikorose/DeepFilterNet/releases/latest).
-2. Download `deep-filter-<version>-x86_64-pc-windows-msvc.exe` (~27 MB, no installer).
-3. Put it somewhere permanent, then either rename it to `deep-filter.exe` and put that folder on
-   your PATH, or point **Settings → Audio front-end → deep-filter binary** at it.
+2. Download the asset for your platform (~27 MB, no installer):
+
+   | | |
+   | --- | --- |
+   | Windows | `deep-filter-<version>-x86_64-pc-windows-msvc.exe` |
+   | macOS (Apple silicon) | `deep-filter-<version>-aarch64-apple-darwin` |
+   | macOS (Intel) | `deep-filter-<version>-x86_64-apple-darwin` |
+   | Linux (x86-64) | `deep-filter-<version>-x86_64-unknown-linux-musl` |
+   | Linux (ARM64) | `deep-filter-<version>-aarch64-unknown-linux-gnu` |
+
+3. Put it somewhere permanent — on macOS and Linux, `chmod +x` it — then either put its folder on
+   your PATH under the name `deep-filter`, or point **Settings → Audio front-end → deep-filter
+   binary** at it.
 
 > **Why not `pip install deepfilternet`?** The package depends on `deepfilterlib`, which has no
 > wheels past Python 3.11 and fails to build from source on newer Pythons. The standalone binary is
 > the same model and does not care which Python you run. With neither installed the app falls back
-> to ffmpeg's `afftdn` filter — real, but clearly weaker on background chatter, and the UI says so
-> rather than pretending otherwise.
+> to ffmpeg's own `afftdn` denoiser — real, but clearly weaker on background chatter, and the UI
+> says so rather than pretending otherwise.
 
-### 5. PyTorch for a GPU (optional)
+#### 5. PyTorch for a GPU (optional)
 
 Skip this if you have no NVIDIA GPU. Do it **before** step 6, and do not use a plain
 `pip install torch` — that installs the CPU build.
 
-Check what your driver supports:
+Check what your driver supports with `nvidia-smi`; the top-right "CUDA Version" is the *highest* it
+supports, and anything at or below works. Then install the matched set:
 
-```powershell
-nvidia-smi
-```
-
-The top-right "CUDA Version" is the *highest* your driver supports; anything at or below it works.
-Then install the matched set from the CUDA 12.6 channel:
-
-```powershell
+```bash
 pip install torch torchvision torchaudio torchcodec --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Verify:
+Verify: `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"` — you want
+`True`.
 
-```powershell
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
+**CUDA 12 is deliberately preferred over CUDA 13**, because CTranslate2 — the engine that actually
+runs Whisper — is built against CUDA 12 and cuDNN 9. If PyTorch releases a version the `cu126`
+channel has stopped publishing, the Components window works out which channel actually has it.
 
-You want `True`. If PyTorch releases a version the `cu126` channel has stopped publishing, the
-Components window works out which channel actually has it — see
-[Keeping it up to date](#keeping-it-up-to-date).
+There is no CUDA on macOS, and CTranslate2 has no Metal backend, so Whisper is CPU-only there.
 
-### 6. Speaker diarization (optional)
+#### 6. Speaker diarization (optional)
 
-```powershell
+```bash
 pip install -e ".[diarization]"
 ```
 
-Then two things the installer cannot do for you:
+Then two things no installer can do for you:
 
 1. **Accept the model licences.** Sign in at [huggingface.co](https://huggingface.co) and click
    *Agree and access* on all three:
@@ -275,16 +325,18 @@ Then two things the installer cannot do for you:
    setup wizard or Settings. Its **Test** button checks the token *and* all three licences, and
    tells you which one you missed.
 
-### 7. PLAUD cloud import (optional)
+#### 7. PLAUD cloud import (optional)
 
 Only needed to pull recordings from a PLAUD account; local files work without it.
 
-```powershell
-winget install OpenJS.NodeJS.LTS
-npm install -g @plaud-ai/cli
-```
+| | |
+| --- | --- |
+| **Windows** | `winget install OpenJS.NodeJS.LTS` |
+| **macOS** | `brew install node` |
+| **Debian/Ubuntu** | `sudo apt install nodejs npm` (check `node --version` is 20+; if not, use [nodesource](https://github.com/nodesource/distributions)) |
 
-Sign in once — the wizard's PLAUD page does it for you. The CLI holds the token, not this app.
+Then `npm install -g @plaud-ai/cli`. Sign in once — the wizard's PLAUD page does it for you. The
+CLI holds the token, not this app.
 
 ---
 

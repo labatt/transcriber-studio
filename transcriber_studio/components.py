@@ -36,6 +36,8 @@ UNKNOWN = "unknown"        # installed; the index was asked and did not answer
 
 PIP = [sys.executable, "-m", "pip"]
 NETWORK_TIMEOUT = 8
+#: Some indexes (GitHub's especially) refuse a request with no User-Agent.
+USER_AGENT = "transcriber-studio"
 
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+){1,3})")
 
@@ -316,20 +318,37 @@ def latest_version(component: Component) -> str:
     return ""
 
 
-def _json_field(url: str, path: tuple[str, ...]) -> str:
-    import requests
+def fetch(url: str) -> str:
+    """GET a URL as text, using requests if it is installed and urllib if not.
 
-    data = requests.get(url, timeout=NETWORK_TIMEOUT).json()
+    The installer runs before anything is installed, so this module has to work
+    on a bare Python. requests is still preferred when present: it handles
+    proxies and corporate TLS setups that urllib does not.
+    """
+    try:
+        import requests
+    except ImportError:
+        from urllib.request import Request, urlopen
+
+        request = Request(url, headers={"User-Agent": USER_AGENT})
+        with urlopen(request, timeout=NETWORK_TIMEOUT) as response:
+            return response.read().decode("utf-8", "replace")
+    return requests.get(
+        url, timeout=NETWORK_TIMEOUT, headers={"User-Agent": USER_AGENT}
+    ).text
+
+
+def _json_field(url: str, path: tuple[str, ...]) -> str:
+    import json as _json
+
+    data = _json.loads(fetch(url))
     for key in path:
         data = data[key]
     return str(data or "")
 
 
 def _text(url: str) -> str:
-    import requests
-
-    body = requests.get(url, timeout=NETWORK_TIMEOUT).text.strip()
-    match = _VERSION_RE.search(body)
+    match = _VERSION_RE.search(fetch(url).strip())
     return match.group(1) if match else ""
 
 
@@ -588,14 +607,10 @@ def channel_has(channel: str, version: str) -> bool:
     """
     import sysconfig
 
-    import requests
-
     python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
     try:
-        body = requests.get(
-            f"https://download.pytorch.org/whl/{channel}/torch/", timeout=NETWORK_TIMEOUT
-        ).text
+        body = fetch(f"https://download.pytorch.org/whl/{channel}/torch/")
     except Exception:
         return False
     needle = f"torch-{version}%2B{channel}-{python_tag}-{python_tag}-{platform_tag}.whl"

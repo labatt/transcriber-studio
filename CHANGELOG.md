@@ -6,6 +6,22 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **An installer.** `install.ps1` (Windows) and `install.sh` (macOS/Linux) find or install a
+  suitable Python and hand over to `install.py`, which detects the OS, package manager, GPU and
+  driver, then checks each requirement's version and installs or upgrades only what is missing.
+  `--check`, `--dry-run`, `--yes`, `--minimal` and `--no-gpu` are all supported. Where there is no
+  package manager it downloads what it needs directly, including a static ffmpeg build on Windows
+  and the DeepFilterNet binary for the running platform.
+
+### Changed
+
+- The manual install instructions cover Windows, macOS and Linux rather than assuming `winget`.
+- `transcriber_studio.components` now reaches the network through the standard library when
+  `requests` is absent, so the installer and the component registry share one implementation
+  instead of the installer duplicating it.
+
 ## [0.1.0] — 2026-08-27
 
 First public release.
