@@ -64,8 +64,8 @@ COMPONENTS: list[Component] = [
         key="ffmpeg",
         title="ffmpeg",
         why="Decodes the audio, splits channels, and runs the fallback denoiser.",
-        kind="winget",
-        package="Gyan.FFmpeg",
+        kind="system",
+        package="ffmpeg",
         url="https://ffmpeg.org/download.html",
         optional=False,
         install_steps=["Install it, then restart this app so it picks up the new PATH:"],
@@ -132,9 +132,10 @@ COMPONENTS: list[Component] = [
         kind="download",
         url="https://github.com/Rikorose/DeepFilterNet/releases/latest",
         install_steps=[
-            "Download the x86_64-pc-windows-msvc .exe from the releases page.",
+            "Download the build for this machine from the releases page "
+            "(look for the asset whose name matches your platform).",
             "Point Settings → Audio front-end at it, or put it on your PATH as "
-            "deep-filter.exe.",
+            "deep-filter.",
         ],
     ),
     Component(
@@ -417,12 +418,23 @@ def needs_elevation(component: Component) -> bool:
         return False
     if component.kind == "pip":
         return pip_scope() == "elevated"
-    if component.kind == "winget":
-        # A user-scope package installs fine; a machine-scope one prompts. We
-        # cannot know which in advance, so the flags below keep it from hanging
+    if component.kind == "system":
+        # apt needs root; winget and brew normally do not. We cannot know a
+        # winget package's scope in advance, so the flags keep it from hanging
         # and the output says if it was refused.
-        return False
+        return _platform_key() == "linux"
     return False
+
+
+def can_elevate() -> bool:
+    """Whether this app can re-run a command with more rights on its own.
+
+    Only on Windows, where the UAC flow is a documented, tested path. There is
+    no equivalent here for sudo/pkexec/osascript that has been exercised, and a
+    privilege-escalation path nobody has run is not something to ship — the UI
+    shows the command to run by hand instead.
+    """
+    return sys.platform == "win32"
 
 
 #: Fragments Windows and pip use when the answer is "you may not write there".
@@ -472,6 +484,40 @@ WINGET_FLAGS = [
     "--disable-interactivity",
 ]
 
+#: How each platform installs a system package, for components of kind
+#: "system". The value is (manager, install args, update args); a platform with
+#: no entry gets no command and is pointed at the project's own download page.
+SYSTEM_PACKAGES: dict[str, dict[str, tuple[str, list[str], list[str]]]] = {
+    "ffmpeg": {
+        "win32": ("winget", ["install", "--id", "Gyan.FFmpeg", *WINGET_FLAGS],
+                  ["upgrade", "--id", "Gyan.FFmpeg", *WINGET_FLAGS]),
+        "darwin": ("brew", ["install", "ffmpeg"], ["upgrade", "ffmpeg"]),
+        "linux": ("apt-get", ["install", "-y", "ffmpeg"], ["install", "-y", "--only-upgrade", "ffmpeg"]),
+    },
+}
+
+
+def _platform_key() -> str:
+    """sys.platform, collapsed to the three families the tables key on."""
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return sys.platform
+
+
+def system_command(component: Component, *, update: bool) -> list[str]:
+    """The package-manager command for this component on this platform.
+
+    Empty when the platform has no entry — the caller falls back to pointing at
+    the download page, which is better than printing a command that does not
+    exist here.
+    """
+    table = SYSTEM_PACKAGES.get(component.package if component.kind == "system" else "", {})
+    entry = table.get(_platform_key())
+    if not entry:
+        return []
+    manager, install_args, update_args = entry
+    return [executable(manager), *(update_args if update else install_args)]
+
 
 def _pip_install(args: list[str], component: Component, version: str = "") -> list[str]:
     """Assemble a pip command in the order a person would read it."""
@@ -489,8 +535,8 @@ def install_command(component: Component, version: str = "") -> list[str]:
         return _pip_install([component.package], component, version)
     if component.kind == "npm":
         return [executable("npm"), "install", "-g", component.package]
-    if component.kind == "winget":
-        return [executable("winget"), "install", "--id", component.package, *WINGET_FLAGS]
+    if component.kind == "system":
+        return system_command(component, update=False)
     return []
 
 
@@ -504,8 +550,8 @@ def update_command(component: Component, version: str = "") -> list[str]:
         return _pip_install(["--upgrade", component.package], component, version)
     if component.kind == "npm":
         return [executable("npm"), "install", "-g", f"{component.package}@latest"]
-    if component.kind == "winget":
-        return [executable("winget"), "upgrade", "--id", component.package, *WINGET_FLAGS]
+    if component.kind == "system":
+        return system_command(component, update=True)
     return []       # a downloaded binary is replaced by hand
 
 
@@ -616,7 +662,13 @@ class Status:
         if self.state == NOT_NEEDED:
             return "not needed here"
         if self.state == UNCHECKED:
-            return f"{self.installed} installed"
+            # Some tools do not report a parseable version, and `installed`
+            # then already carries the whole message.
+            return (
+                f"{self.installed} installed"
+                if parse_version(self.installed)
+                else self.installed
+            )
         return f"{self.installed} — could not reach the index to compare"
 
 

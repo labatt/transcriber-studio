@@ -13,13 +13,30 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 APP_NAME = "Transcriber Studio"
+
+
+def _default_app_dir() -> Path:
+    """Where this platform expects an application to keep its own data.
+
+    Dropping a bare directory in someone's home folder is a Windows habit that
+    reads as litter on the other two.
+    """
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", Path.home())) / "TranscriberStudio"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "TranscriberStudio"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(xdg) if xdg else Path.home() / ".config") / "transcriber-studio"
+
+
 #: Everything the app stores about itself: settings, queue, glossaries, caches.
-APP_DIR = Path(os.environ.get("APPDATA", Path.home())) / "TranscriberStudio"
+APP_DIR = _default_app_dir()
 CONFIG_PATH = APP_DIR / "settings.json"
 
 #: What the directory was called before the project was renamed. Kept so an

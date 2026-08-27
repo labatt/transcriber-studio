@@ -292,3 +292,67 @@ def test_it_is_still_missing_when_the_stand_in_is_absent_too(monkeypatch):
     monkeypatch.setattr(C, "installed_version", lambda _c, _s=None: "")
 
     assert C.status_for(C.BY_KEY["deepfilternet"]).state == MISSING
+
+
+# ---- other platforms ---------------------------------------------------
+# The app is developed on Windows; these check that the decisions it makes for
+# macOS and Linux are the right ones, since the GUI cannot be exercised here.
+
+
+def test_ffmpeg_is_installed_with_each_platforms_own_package_manager(monkeypatch):
+    ffmpeg = C.BY_KEY["ffmpeg"]
+
+    for platform, manager, verb in (
+        ("win32", "winget", "install"),
+        ("darwin", "brew", "install"),
+        ("linux", "apt-get", "install"),
+    ):
+        monkeypatch.setattr(C.sys, "platform", platform)
+        monkeypatch.setattr(C, "executable", lambda name: name)
+        cmd = C.install_command(ffmpeg)
+        assert cmd[0] == manager, platform
+        assert verb in cmd, platform
+
+
+def test_a_platform_with_no_package_manager_entry_gets_no_command(monkeypatch):
+    """Better to show the download page than a command that does not exist here."""
+    monkeypatch.setattr(C.sys, "platform", "freebsd14")
+
+    assert C.install_command(C.BY_KEY["ffmpeg"]) == []
+    assert C.BY_KEY["ffmpeg"].url        # …which is what the UI falls back to
+
+
+def test_only_windows_offers_to_elevate_a_command_itself(monkeypatch):
+    """An untested privilege-escalation path is not something to ship."""
+    monkeypatch.setattr(C.sys, "platform", "win32")
+    assert C.can_elevate()
+
+    for platform in ("darwin", "linux"):
+        monkeypatch.setattr(C.sys, "platform", platform)
+        assert not C.can_elevate(), platform
+
+
+def test_apt_is_known_to_need_root_where_brew_and_winget_do_not(monkeypatch):
+    monkeypatch.setattr(C, "is_elevated", lambda: False)
+    ffmpeg = C.BY_KEY["ffmpeg"]
+
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    assert C.needs_elevation(ffmpeg)
+
+    for platform in ("darwin", "win32"):
+        monkeypatch.setattr(C.sys, "platform", platform)
+        assert not C.needs_elevation(ffmpeg), platform
+
+
+def test_refresh_path_is_a_windows_concern_and_no_op_elsewhere(monkeypatch):
+    monkeypatch.setattr(C.sys, "platform", "linux")
+    assert C.refresh_path() == []
+
+
+def test_a_tool_without_a_parseable_version_is_not_reported_twice(monkeypatch):
+    """deep-filter reports "installed" when -V gives nothing; "installed
+    installed" was what that used to render as."""
+    status = C.Status(C.BY_KEY["deep-filter"], "installed", "", C.UNCHECKED)
+
+    assert status.summary() == "installed"
+    assert C.Status(C.BY_KEY["ffmpeg"], "9.0.1", "", C.UNCHECKED).summary() == "9.0.1 installed"

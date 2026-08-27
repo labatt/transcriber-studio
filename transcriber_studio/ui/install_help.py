@@ -452,9 +452,19 @@ class InstallHelpDialog(SheetDialog):
             as_user = box.addButton(
                 "Install for me only (--user)", QMessageBox.ButtonRole.AcceptRole
             )
-        as_admin = box.addButton(
-            "Run as administrator", QMessageBox.ButtonRole.DestructiveRole
-        )
+        as_admin = None
+        if components.can_elevate():
+            as_admin = box.addButton(
+                "Run as administrator", QMessageBox.ButtonRole.DestructiveRole
+            )
+        else:
+            # No tested escalation path off Windows, and an untested one is not
+            # something to run on someone's machine. Hand over the command.
+            box.setInformativeText(
+                box.informativeText()
+                + "\n\nTo install system-wide, run the command shown above "
+                "yourself with sudo."
+            )
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
         clicked = box.clickedButton()
@@ -463,7 +473,7 @@ class InstallHelpDialog(SheetDialog):
             if "--user" not in command:
                 command = command + ["--user"]
             self._run(status, command)
-        elif clicked is as_admin:
+        elif as_admin is not None and clicked is as_admin:
             self._run(status, self._command_for(status), elevated=True)
 
     def closeEvent(self, event):
