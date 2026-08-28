@@ -199,17 +199,22 @@ def split_points(duration: float, target: float, quiet: list[float]) -> list[flo
 
 
 def split_for_upload(
-    path: str, target_seconds: float, out_dir: str, log=None, timeout: float = FFMPEG_TIMEOUT
-) -> list[tuple[str, float]]:
-    """Cut a recording into uploadable parts. Returns (path, start offset).
+    path: str, target_seconds: float, out_dir: str, log=None, overlap: float = 0.0,
+    timeout: float = FFMPEG_TIMEOUT,
+) -> list[tuple[str, float, float]]:
+    """Cut a recording into uploadable parts. Returns (path, start, seam).
 
-    The offset is what puts each part's timestamps back onto the original
-    timeline once the parts come back transcribed.
+    ``start`` puts the part's timestamps back on the original timeline. ``seam``
+    is where this part's words actually belong: every part after the first
+    begins ``overlap`` seconds early, and that lead-in is transcribed twice on
+    purpose. Hearing the same speech in two parts is what lets an engine that
+    numbers speakers per request be matched up across the join — the duplicate
+    words themselves are thrown away.
     """
     info = probe(path)
     duration = float(info.get("duration") or 0.0)
     if duration <= target_seconds:
-        return [(path, 0.0)]
+        return [(path, 0.0, 0.0)]
 
     try:
         quiet = silence_midpoints(path, timeout=timeout)
@@ -223,14 +228,15 @@ def split_for_upload(
 
     bounds = [0.0, *cuts, duration]
     suffix = Path(path).suffix or ".wav"
-    parts: list[tuple[str, float]] = []
+    parts: list[tuple[str, float, float]] = []
     for index in range(len(bounds) - 1):
-        start, end = bounds[index], bounds[index + 1]
+        seam, end = bounds[index], bounds[index + 1]
+        start = max(0.0, seam - overlap) if index else 0.0
         part = Path(out_dir) / f"part{index:03d}{suffix}"
         subprocess.run(
             [FFMPEG, "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
              "-i", path, "-c", "copy", str(part)],
             capture_output=True, check=True, timeout=timeout,
         )
-        parts.append((str(part), start))
+        parts.append((str(part), start, seam))
     return parts

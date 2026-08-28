@@ -196,18 +196,23 @@ def test_a_recording_over_the_ceiling_goes_through_in_parts():
     opts = TranscribeOptions(gemini_api_key="k", gemini_mode="verbatim",
                              diarization_enabled=True)
 
-    # Two parts, the second starting half an hour in.
-    parts = [("a.mp3", 0.0), ("b.mp3", 1800.0)]
+    # Two parts, the second starting early to overlap the first.
+    parts = [("a.mp3", 0.0, 0.0), ("b.mp3", 1620.0, 1800.0)]
     responses = [
-        {"steps": [{"content": [{"text": "one two", "annotations": [
-            {"type": "word_info", "text": "one", "start_offset": "0s",
-             "end_offset": "1s", "speaker": "1", "start_index": 0, "end_index": 3},
-            {"type": "word_info", "text": "two", "start_offset": "1s",
-             "end_offset": "2s", "speaker": "1", "start_index": 4, "end_index": 7},
+        # Part one runs to the seam at 1800s.
+        {"steps": [{"content": [{"text": "alpha two", "annotations": [
+            {"type": "word_info", "text": "alpha", "start_offset": "1700s",
+             "end_offset": "1701s", "speaker": "1", "start_index": 0, "end_index": 5},
+            {"type": "word_info", "text": "two", "start_offset": "1795s",
+             "end_offset": "1796s", "speaker": "1", "start_index": 6, "end_index": 9},
         ]}]}]},
-        {"steps": [{"content": [{"text": "three", "annotations": [
-            {"type": "word_info", "text": "three", "start_offset": "5s",
-             "end_offset": "6s", "speaker": "1", "start_index": 0, "end_index": 5},
+        # Part two starts at 1620s, so its 175s is 1795s — the repeated word,
+        # which it numbers "9" where part one said "1".
+        {"steps": [{"content": [{"text": "two three", "annotations": [
+            {"type": "word_info", "text": "two", "start_offset": "175s",
+             "end_offset": "176s", "speaker": "9", "start_index": 0, "end_index": 3},
+            {"type": "word_info", "text": "three", "start_offset": "185s",
+             "end_offset": "186s", "speaker": "9", "start_index": 4, "end_index": 9},
         ]}]}]},
     ]
     uploaded = []
@@ -222,9 +227,54 @@ def test_a_recording_over_the_ceiling_goes_through_in_parts():
 
     assert uploaded == ["a.mp3", "b.mp3"], "it did not send both parts"
     words = " ".join(s.text for s in result.segments)
-    assert "one two" in words and "three" in words
-    # The second part's 5s is 30m05s on the real timeline, not 5s.
+    assert "alpha" in words and "three" in words
+    # 185s into a part starting at 1620s is 1805s on the real timeline.
     assert result.segments[-1].start == 1805.0
+    # "two" was transcribed by both parts; only the first part's copy survives.
+    assert words.count("two") == 1
+    # Part two called the speaker "9" and part one called them "1"; the overlap
+    # says they are the same person, so the transcript has one speaker.
+    assert result.speakers == ["Speaker 1"]
+
+
+def test_the_bridge_matches_speakers_by_the_repeated_speech():
+    established = [
+        {"type": "word", "text": "a", "start": 1700.0, "end": 1701.0, "speaker_id": "p1:1"},
+        {"type": "word", "text": "b", "start": 1750.0, "end": 1751.0, "speaker_id": "p1:2"},
+    ]
+    incoming = [
+        {"type": "word", "text": "a", "start": 1700.2, "end": 1701.2, "speaker_id": "p2:7"},
+        {"type": "word", "text": "b", "start": 1750.1, "end": 1751.1, "speaker_id": "p2:4"},
+        {"type": "word", "text": "c", "start": 1900.0, "end": 1901.0, "speaker_id": "p2:7"},
+    ]
+    bridge = g._speaker_bridge(established, incoming, seam=1800.0, overlap=180.0)
+
+    assert bridge == {"p2:7": "p1:1", "p2:4": "p1:2"}
+
+
+def test_the_bridge_declines_to_guess_when_nothing_lines_up():
+    """A join where the timings do not correspond must not invent a match."""
+    established = [
+        {"type": "word", "text": "a", "start": 1700.0, "end": 1701.0, "speaker_id": "p1:1"},
+    ]
+    incoming = [
+        {"type": "word", "text": "z", "start": 1790.0, "end": 1791.0, "speaker_id": "p2:7"},
+    ]
+    assert g._speaker_bridge(established, incoming, seam=1800.0, overlap=180.0) == {}
+
+
+def test_the_bridge_takes_the_majority_when_a_word_or_two_disagree():
+    established = [
+        {"type": "word", "text": w, "start": 1700.0 + i, "end": 1700.5 + i,
+         "speaker_id": "p1:1" if i != 2 else "p1:2"}
+        for i, w in enumerate("abcd")
+    ]
+    incoming = [
+        {"type": "word", "text": w, "start": 1700.05 + i, "end": 1700.55 + i,
+         "speaker_id": "p2:5"}
+        for i, w in enumerate("abcd")
+    ]
+    assert g._speaker_bridge(established, incoming, seam=1800.0, overlap=180.0) == {"p2:5": "p1:1"}
 
 
 def test_split_points_cuts_on_the_clock_when_there_is_no_pause():
@@ -256,3 +306,26 @@ def test_smart_mode_gets_the_full_hour():
     config = g.build_config(TranscribeOptions(gemini_mode="smart"))
 
     assert g.length_ceiling(config) == g.MAX_MINUTES_PLAIN == 60
+
+
+def test_two_voices_cannot_both_claim_the_same_speaker():
+    """Merging two people into one is how a speaker vanishes mid-transcript.
+
+    Seen for real: the second half of a recording came back with one speaker
+    where there were two, and the log reported a clean match.
+    """
+    established = [
+        {"type": "word", "text": "a", "start": 1700.0, "end": 1701.0, "speaker_id": "p1:1"},
+        {"type": "word", "text": "b", "start": 1702.0, "end": 1703.0, "speaker_id": "p1:1"},
+        {"type": "word", "text": "c", "start": 1704.0, "end": 1705.0, "speaker_id": "p1:2"},
+    ]
+    # Both incoming voices look most like p1:1 on a naive nearest-word vote.
+    incoming = [
+        {"type": "word", "text": "a", "start": 1700.1, "end": 1701.1, "speaker_id": "p2:5"},
+        {"type": "word", "text": "b", "start": 1702.1, "end": 1703.1, "speaker_id": "p2:5"},
+        {"type": "word", "text": "b2", "start": 1702.2, "end": 1703.2, "speaker_id": "p2:6"},
+    ]
+    bridge = g._speaker_bridge(established, incoming, seam=1800.0, overlap=180.0)
+
+    assert len(set(bridge.values())) == len(bridge), f"two voices merged: {bridge}"
+    assert bridge.get("p2:5") == "p1:1"

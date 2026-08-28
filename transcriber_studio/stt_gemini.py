@@ -39,8 +39,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from . import audio_utils, diarization
-from .job_cancel import JobCancelled, ShouldCancel, check_cancel
+from . import audio_utils
+from .job_cancel import ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
 from .word_segments import words_to_segments
 
@@ -99,6 +99,13 @@ PRACTICAL_MINUTES_WITH_FEATURES = 54
 #: rather than right up against it, because the boundary was bracketed rather
 #: than pinned and Google can move it without telling anyone.
 UPLOAD_CHUNK_MINUTES = 30
+
+#: How much of the previous part each part repeats. The repeated stretch is
+#: transcribed twice and then discarded — it exists so the same speech is seen
+#: by two requests, which is what lets their speaker numbers be matched. Long
+#: enough that everyone present has usually said something in it; a seam where
+#: only one person talks can only match that one.
+OVERLAP_SECONDS = 180
 
 READ_TIMEOUT = 1800         # a long recording takes minutes to come back
 UPLOAD_TIMEOUT = 900
@@ -390,60 +397,58 @@ def plain_text(response: dict) -> str:
     return "".join(parts).strip() or str(response.get("output_text") or "").strip()
 
 
-def _relabel_from_local_diarization(
-    words: list[dict], audio_path: str, opts, progress_cb, log, should_cancel
-) -> bool:
-    """Replace per-part speaker ids with labels from one pass over the whole file.
+def _speaker_bridge(
+    established: list[dict], incoming: list[dict], seam: float, overlap: float
+) -> dict[str, str]:
+    """Map a new part's speaker ids onto the ones already in use.
 
-    Gemini's speaker numbers only mean anything inside a single request, so
-    across parts they are noise. pyannote runs locally with no length limit, so
-    one pass over the whole recording gives every word a speaker from the same
-    frame of reference. Returns whether it worked.
+    Both parts transcribed the stretch before the seam, so the same words are
+    described twice with different numbering. Matching each repeated word to
+    the nearest already-labelled word and taking a majority vote per id is
+    enough to line them up — no voice modelling, just the clock.
     """
-    if not diarization.is_available():
-        log(
-            "Gemini: speaker labels will not be consistent between parts — Gemini "
-            "numbers each request separately, and pyannote is not installed to "
-            "reconcile them. Install pyannote.audio, or keep recordings under an hour."
-        )
-        return False
-    token = (getattr(opts, "hf_token", "") or "").strip()
-    if not token:
-        log(
-            "Gemini: speaker labels will not be consistent between parts — that "
-            "needs a HuggingFace token so speakers can be detected across the whole "
-            "recording at once. Add one in Settings."
-        )
-        return False
+    before = [
+        w for w in established
+        if w.get("type") == "word" and seam - overlap <= w.get("start", 0.0) < seam
+    ]
+    repeated = [
+        w for w in incoming
+        if w.get("type") == "word" and w.get("start", 0.0) < seam
+    ]
+    if not before or not repeated:
+        return {}
 
-    log("Gemini: detecting speakers across the whole recording for consistent labels…")
-    try:
-        turns = diarization.Diarizer(token, getattr(opts, "device", "auto")).diarize(
-            audio_path,
-            getattr(opts, "min_speakers", 0),
-            getattr(opts, "max_speakers", 0),
-            progress_cb=(lambda f: progress_cb(0.72 + f * 0.23)) if progress_cb else None,
-            log_cb=log,
-            should_cancel=should_cancel,
-        )
-    except JobCancelled:
-        raise
-    except Exception as exc:
-        log(f"Gemini: could not detect speakers across the recording ({exc}) — "
-            f"falling back to Gemini's own numbering, which is not consistent "
-            f"between parts.")
-        return False
-
-    if not turns:
-        return False
-    for word in words:
-        if word.get("type") != "word":
+    votes: dict[str, dict[str, int]] = {}
+    for word in repeated:
+        mine = word.get("speaker_id") or ""
+        if not mine:
             continue
-        speaker = diarization.assign_speaker(word["start"], word["end"], turns)
-        word["speaker_id"] = speaker or ""
-    log(f"Gemini: {len({t.speaker for t in turns})} speaker(s) across the whole "
-        f"recording — labels are consistent between parts.")
-    return True
+        near = min(before, key=lambda w: abs(w["start"] - word["start"]))
+        if abs(near["start"] - word["start"]) > 2.0:
+            continue        # nothing close enough to be the same speech
+        theirs = near.get("speaker_id") or ""
+        if theirs:
+            votes.setdefault(mine, {}).setdefault(theirs, 0)
+            votes[mine][theirs] += 1
+
+    # One-to-one, strongest evidence first. Letting two of the new part's
+    # voices both claim the same established one silently merges two people
+    # into one — which is how a speaker disappears from the back half of a
+    # transcript while the log cheerfully reports a match.
+    ranked = sorted(
+        ((count, mine, theirs)
+         for mine, counts in votes.items()
+         for theirs, count in counts.items()),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    bridge: dict[str, str] = {}
+    claimed: set[str] = set()
+    for _count, mine, theirs in ranked:
+        if mine in bridge or theirs in claimed:
+            continue
+        bridge[mine] = theirs
+        claimed.add(theirs)
+    return bridge
 
 
 def _transcribe_in_parts(
@@ -456,28 +461,28 @@ def _transcribe_in_parts(
     the whole lot is grouped into turns once, at the end — so a speaker change
     that happens to fall near a seam is still just a speaker change.
 
-    Speaker identity cannot come from Gemini here: it numbers speakers within a
-    request and has no idea the other requests exist, so its "Speaker 1" in part
-    two is unrelated to part one's. There is no enrollment API to tell it
-    otherwise. So when pyannote is available the speakers are taken from a
-    single local pass over the whole recording instead — it has no length limit
-    and no seams, which makes the labels consistent by construction rather than
-    by guesswork. Gemini supplies the words, pyannote supplies who said them.
+    Gemini numbers speakers within a request and has no idea the other requests
+    exist, and there is no enrollment API to tell it. So each part repeats the
+    last few minutes of the one before it: the same speech described twice, by
+    two requests, is enough to work out which of their speaker numbers refer to
+    the same person. The repeated words are then dropped, leaving the transcript
+    breaking exactly on the silence-aligned seam.
     """
     with tempfile.TemporaryDirectory(prefix="gemini_parts_") as work:
         parts = audio_utils.split_for_upload(
             audio_path, UPLOAD_CHUNK_MINUTES * 60, work,
             log=lambda m: log(f"Gemini: {m}"),
+            overlap=OVERLAP_SECONDS if diarize else 0.0,
         )
         total = len(parts)
         words: list[dict] = []
         prose: list[str] = []
         billed = 0
+        unmatched = 0
 
-        for index, (part_path, offset) in enumerate(parts, start=1):
+        for index, (part_path, offset, seam) in enumerate(parts, start=1):
             check_cancel(should_cancel, log, message="Gemini: cancelled.")
-            log(f"Gemini: part {index}/{total} ({offset / 60:.0f}–"
-                f"{(offset / 60) + UPLOAD_CHUNK_MINUTES:.0f} min)…")
+            log(f"Gemini: part {index}/{total} (from {offset / 60:.0f} min)…")
             uri = upload(part_path, api_key, log, should_cancel)
             response = _post_interaction(
                 uri, mime_type_for(part_path), opts, api_key, log, should_cancel
@@ -487,6 +492,26 @@ def _transcribe_in_parts(
                 if word.get("type") == "word":
                     word["start"] = float(word.get("start", 0.0)) + offset
                     word["end"] = float(word.get("end", 0.0)) + offset
+                    # Per-part numbering means nothing globally; keep the parts
+                    # apart until the overlap says which of them are the same.
+                    word["speaker_id"] = f"p{index}:{word.get('speaker_id') or ''}"
+
+            if index > 1 and diarize:
+                bridge = _speaker_bridge(words, part_words, seam, OVERLAP_SECONDS)
+                seen = {w.get("speaker_id") for w in part_words
+                        if w.get("type") == "word"}
+                unmatched += len(seen - set(bridge))
+                for word in part_words:
+                    mapped = bridge.get(word.get("speaker_id"))
+                    if mapped:
+                        word["speaker_id"] = mapped
+                # The repeated lead-in has done its job; the transcript itself
+                # still breaks exactly on the silence-aligned seam.
+                part_words = [
+                    w for w in part_words
+                    if w.get("type") != "word" or w.get("start", 0.0) >= seam
+                ]
+
             words.extend(part_words)
             if not part_words:
                 text = plain_text(response)
@@ -495,13 +520,17 @@ def _transcribe_in_parts(
             usage = response.get("usage") or {}
             billed += int(usage.get("total_tokens") or 0)
             if progress_cb:
-                progress_cb(0.05 + 0.67 * index / total)
+                progress_cb(0.05 + 0.9 * index / total)
+
+        if diarize and total > 1:
+            if unmatched:
+                log(f"Gemini: {unmatched} voice(s) could not be matched across a join — "
+                    f"they appear as extra speakers. A join where only one person "
+                    f"speaks has nothing to match the others on.")
+            else:
+                log("Gemini: speaker numbering matched across every join.")
 
     if words:
-        if diarize and total > 1:
-            _relabel_from_local_diarization(
-                words, audio_path, opts, progress_cb, log, should_cancel
-            )
         segments, speakers = words_to_segments(words, diarized=diarize)
     else:
         text = "\n\n".join(prose)

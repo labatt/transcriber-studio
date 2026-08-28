@@ -63,11 +63,13 @@ versions follow [Semantic Versioning](https://semver.org/).
   of the same audio, so it is duration, not size. Parts are cut at a pause near the boundary rather
   than on the clock, so a word is not sliced in half at every seam, and each part's timings are
   shifted back onto the original timeline before the whole transcript is grouped into turns.
-  Speakers come from a single local pyannote pass over the whole recording rather than from Gemini,
-  because Gemini numbers speakers within one request and offers no way to tell it about the others —
-  there is no enrollment API to pass reference voices to. pyannote has no length limit, so one pass
-  gives labels that are consistent by construction. Without pyannote the app says plainly that
-  labels will not line up between parts, rather than implying a continuity it cannot deliver.
+  Each part repeats the last three minutes of the one before it. Gemini numbers speakers within a
+  single request and offers no way to tell it about the others — there is no enrollment API to pass
+  reference voices to — but the same speech described twice by two requests is enough to work out
+  which of their speaker numbers mean the same person. The repeated words are then discarded, so the
+  transcript still breaks exactly on the silence-aligned seam. Diarization stays Gemini's throughout;
+  pyannote plays no part on this path. A join where only one person speaks can only match that one,
+  and the log says how many voices it could not place rather than implying they were matched.
 
 ### Changed
 
