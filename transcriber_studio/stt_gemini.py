@@ -83,6 +83,16 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MINUTES_PLAIN = 60
 MAX_MINUTES_WITH_FEATURES = 30
 
+#: What the API actually does, which is not what the docs say. Probed against
+#: gemini-3.5-transcribe in verbatim mode with diarization on: 35, 46, 51 and
+#: 54 minutes were all accepted; 57 and 80 minutes came back
+#: "Invalid input received." with no further detail. The documented 30 minute
+#: figure is not enforced, so warning at 30 cried wolf while the real wall at
+#: ~55 arrived as an opaque 400 after uploading the whole file.
+#: Conservative by a couple of minutes, because the boundary was bracketed
+#: rather than pinned exactly and may move.
+PRACTICAL_MINUTES_WITH_FEATURES = 54
+
 READ_TIMEOUT = 1800         # a long recording takes minutes to come back
 UPLOAD_TIMEOUT = 900
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -266,15 +276,15 @@ def build_config(opts) -> dict[str, Any]:
 
 
 def length_ceiling(config: dict[str, Any]) -> int:
-    """The documented per-request limit for a config, in minutes.
+    """The per-request limit for a config, in minutes — measured, not documented.
 
     Keyed on what the request actually asks for rather than on diarization
-    alone: word timestamps drop the ceiling to 30 minutes by themselves, and
-    verbatim mode always asks for them.
+    alone: word timestamps drop the ceiling by themselves, and verbatim mode
+    always asks for them.
     """
     mode = config.get("mode") or {}
     if mode.get("diarization_mode") or mode.get("timestamp_granularities"):
-        return MAX_MINUTES_WITH_FEATURES
+        return PRACTICAL_MINUTES_WITH_FEATURES
     return MAX_MINUTES_PLAIN
 
 
@@ -407,13 +417,20 @@ def transcribe(
         log("Gemini: smart mode cannot separate speakers — the transcript will be unlabelled.")
 
     minutes = (recording.duration_seconds or 0) / 60
-    if minutes > length_ceiling(config):
-        ceiling = length_ceiling(config)
-        log(
-            f"Gemini: this recording is {minutes:.0f} min and Google documents a "
-            f"{ceiling} min limit for these settings — sending it anyway, but it may "
-            f"come back short or refused."
+    ceiling = length_ceiling(config)
+    if minutes > ceiling:
+        # Refusing here rather than uploading a hundred megabytes to be told
+        # "Invalid input received." with nothing to act on.
+        raise GeminiError(
+            f"This recording is {minutes:.0f} minutes and Gemini refuses anything "
+            f"over about {ceiling} in {mode} mode — it answers a longer one with "
+            f'"Invalid input received." and no explanation.\n\n'
+            f"Either split the recording and run the parts separately, or use the "
+            f"local Whisper engine, which has no length limit."
         )
+    if not recording.duration_seconds:
+        # Nothing to check against; the API is the only thing that will say no.
+        log("Gemini: recording length unknown — cannot check it against the limit first.")
 
     if progress_cb:
         progress_cb(0.05)

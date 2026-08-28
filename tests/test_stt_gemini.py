@@ -164,14 +164,51 @@ def test_word_timestamps_alone_lower_the_length_ceiling():
                                               diarization_enabled=False))
 
     assert "diarization_mode" not in config["mode"]
-    assert g.length_ceiling(config) == g.MAX_MINUTES_WITH_FEATURES
+    assert g.length_ceiling(config) == g.PRACTICAL_MINUTES_WITH_FEATURES
 
 
 def test_speakers_also_lower_it():
     config = g.build_config(TranscribeOptions(gemini_mode="verbatim",
                                               diarization_enabled=True))
 
-    assert g.length_ceiling(config) == g.MAX_MINUTES_WITH_FEATURES
+    assert g.length_ceiling(config) == g.PRACTICAL_MINUTES_WITH_FEATURES
+
+
+def test_the_ceiling_is_the_measured_one_not_the_documented_one():
+    """Google documents 30 minutes and does not enforce it.
+
+    Probed against gemini-3.5-transcribe, verbatim with diarization: 35, 46, 51
+    and 54 minutes were accepted, 57 and 80 were refused with a bare
+    "Invalid input received.". Warning at 30 cried wolf while the real wall
+    arrived as an opaque 400 after the whole file had been uploaded.
+    """
+    assert g.PRACTICAL_MINUTES_WITH_FEATURES > g.MAX_MINUTES_WITH_FEATURES
+    assert 50 <= g.PRACTICAL_MINUTES_WITH_FEATURES <= 56
+
+
+def test_a_recording_over_the_ceiling_is_refused_before_it_is_uploaded():
+    """Uploading 150 MB to be told "Invalid input received." helps nobody."""
+    import pytest
+
+    from transcriber_studio.models import Recording, Source
+
+    rec = Recording(source=Source.LOCAL, id="long.mp3", name="long",
+                    date="2026-08-28", local_path="long.mp3",
+                    duration_seconds=80 * 60)
+    opts = TranscribeOptions(gemini_api_key="k", gemini_mode="verbatim",
+                             diarization_enabled=True)
+    sent = []
+    original, g.upload = g.upload, lambda *a, **k: sent.append(a) or "uri"
+    try:
+        with pytest.raises(g.GeminiError) as caught:
+            g.transcribe(rec, "long.mp3", opts)
+    finally:
+        g.upload = original
+
+    assert not sent, "it uploaded the file before finding out it was too long"
+    message = str(caught.value)
+    assert "80 minutes" in message
+    assert "split" in message.lower()
 
 
 def test_smart_mode_gets_the_full_hour():
