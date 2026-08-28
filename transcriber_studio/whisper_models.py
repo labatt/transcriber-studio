@@ -59,13 +59,17 @@ MODELS: dict[str, ModelInfo] = {
         "The default with a GPU: best accuracy on names, jargon and crosstalk.",
     ),
     CRISPER: ModelInfo(
-        CRISPER, "1550M", "~10 GB", "about the same", "Best (verbatim)",
+        CRISPER, "1550M", "~10 GB", "Much slower", "Best (verbatim)",
         "Hard audio where you want every word as spoken: it keeps the fillers, "
         "stutters and false starts that stock Whisper quietly tidies away, and "
         "it hallucinates less over noise. Pair it with AI Cleanup, which is "
         "where the tidying should happen — after the words are on the page.",
         label="CrisperWhisper (large-v3 verbatim fine-tune)",
         caveats=(
+            "Much slower than large-v3 — several times, not a little. Same size and "
+            "architecture, so the cost per token is identical, but a verbatim model "
+            "writes down every filler and false start, and Whisper decodes one token "
+            "at a time. Budget around realtime: an hour of audio takes about an hour.",
             "English and German only — the fine-tune was trained on those two, "
             "and other languages are not covered by it.",
             "Word timestamps are less precise here than in the original "
