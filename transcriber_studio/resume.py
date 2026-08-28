@@ -250,17 +250,27 @@ def decode_key(recording: Recording, opts: Any) -> str:
     )
 
 
-def decode_to_dict(segments: list[Segment], language: str) -> dict[str, Any]:
+def decode_to_dict(
+    segments: list[Segment], language: str, words: list[dict] | None = None
+) -> dict[str, Any]:
+    """The decode, including its word timings.
+
+    The words are what let speakers be assigned per word rather than per
+    segment, so a restored decode has to carry them — otherwise resuming would
+    quietly produce worse speaker labels than running straight through.
+    """
     return {
         "language": language,
         "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in segments],
+        "words": words or [],
     }
 
 
-def decode_from_dict(data: dict[str, Any]) -> tuple[list[Segment], str]:
+def decode_from_dict(data: dict[str, Any]) -> tuple[list[Segment], str, list[dict]]:
     return (
         [Segment(**s) for s in data.get("segments", [])],
         data.get("language", ""),
+        list(data.get("words") or []),
     )
 
 

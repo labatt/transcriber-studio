@@ -36,6 +36,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   that produced the words survive a failure in the stage that only labels them. Resume offers
   "transcribed audio (speakers still to do)" and picks up from there. The checkpoint deliberately
   ignores the diarization settings, since speaker labels are attached to the segments afterwards.
+- **Speakers are assigned per word instead of per segment.** Whisper cuts segments on pauses and
+  punctuation, never on speaker changes, so a segment routinely holds two people. Labelling the
+  whole segment by whichever speaker overlapped it most filed one person's words under the other's
+  name, which on a fast back-and-forth is most of the transcript. Word timings were already being
+  computed and then discarded; they are now kept, each word is matched to a diarization turn, and
+  the segment is split where the floor changes hands. Falls back to the old behaviour when word
+  timestamps are off. Resume checkpoints carry the word timings so a resumed job labels speakers
+  as well as one that ran straight through.
 - **Speaker detection can be cancelled.** pyannote runs as one long call; the app now interrupts it
   through the progress hook, and the Cancel button is wired to it. A cancel is also no longer
   swallowed by the handler that skips past a failed diarization.

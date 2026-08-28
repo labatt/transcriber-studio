@@ -24,6 +24,7 @@ from . import resume as resume_store
 from .hardware import cuda_available
 from .job_cancel import JobCancelled, ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
+from .word_segments import words_to_segments
 
 ENGINE_LOCAL = "local"
 ENGINE_ELEVENLABS = "elevenlabs"
@@ -302,11 +303,20 @@ class Transcriber:
         # it. Say something periodically, so the log is evidence of work rather
         # than a gap the user has to interpret.
         last_report = time.monotonic()
+        # Word timings are computed anyway when word_timestamps is on (they are
+        # what the hallucination guard watches). Keeping them lets speakers be
+        # assigned per word instead of per segment, which is the difference
+        # between splitting a segment where the floor changes hands and filing
+        # both halves under whoever happened to talk longer.
+        words: list[dict] = []
         # faster-whisper decodes lazily, so this loop is where a long
         # transcription can actually be interrupted.
         for seg in segments_iter:
             check_cancel(should_cancel, log, message="Cancelled — stopping transcription.")
             out.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
+            for w in getattr(seg, "words", None) or []:
+                words.append({"type": "word", "text": w.word,
+                              "start": float(w.start), "end": float(w.end)})
             if progress_cb and total_dur:
                 progress_cb(min(0.95, seg.end / total_dur))
             if total_dur and time.monotonic() - last_report >= DECODE_REPORT_SECONDS:
@@ -315,7 +325,7 @@ class Transcriber:
                     f"Transcribed {seg.end / 60:.0f} of {total_dur / 60:.0f} min "
                     f"({seg.end / total_dur:.0%}) — {len(out)} segment(s) so far."
                 )
-        return out, info.language
+        return out, info.language, words
 
     def _transcribe_single(
         self, recording, audio_path, model, language, opts, progress_cb, log,
@@ -325,7 +335,7 @@ class Transcriber:
         bank = resume if resume is not None else resume_store.ResumeLog(None)
         decode_key = resume_store.decode_key(recording, opts)
 
-        segments, detected_lang = self._decode_or_restore(
+        segments, detected_lang, words = self._decode_or_restore(
             bank, decode_key, recording, audio_path, model, language, opts,
             progress_cb, log, should_cancel,
         )
@@ -340,7 +350,8 @@ class Transcriber:
             bank.record(
                 decode_key,
                 json.dumps(
-                    resume_store.decode_to_dict(segments, detected_lang), ensure_ascii=False
+                    resume_store.decode_to_dict(segments, detected_lang, words),
+                    ensure_ascii=False,
                 ),
                 stage=resume_store.DECODE_STAGE,
                 segments=len(segments),
@@ -357,13 +368,7 @@ class Transcriber:
                     log_cb=log,
                     should_cancel=should_cancel,
                 )
-                mapping = self._stable_speaker_map(turns)
-                for seg in segments:
-                    raw = diarization.assign_speaker(seg.start, seg.end, turns)
-                    seg.speaker = mapping.get(raw) if raw else None
-                speakers_order = list(dict.fromkeys(
-                    s.speaker for s in segments if s.speaker
-                ))
+                segments, speakers_order = self._apply_speakers(segments, words, turns, log)
             except JobCancelled:
                 # Diarization failing is survivable and the transcript is still
                 # worth having; the user pressing Cancel is neither.
@@ -389,14 +394,16 @@ class Transcriber:
         saved = bank.get(key)
         if saved:
             try:
-                segments, detected_lang = resume_store.decode_from_dict(json.loads(saved))
+                segments, detected_lang, words = resume_store.decode_from_dict(
+                    json.loads(saved)
+                )
                 log(
                     f"Restored {len(segments)} transcribed segment(s) from an interrupted "
                     f"run — going straight to speaker detection."
                 )
                 if progress_cb:
                     progress_cb(0.95)
-                return segments, detected_lang
+                return segments, detected_lang, words
             except Exception as e:
                 log(f"Saved transcription unusable ({e}) — transcribing again.")
 
@@ -418,7 +425,7 @@ class Transcriber:
         for i, (label, wav) in enumerate(channels):
             check_cancel(should_cancel, log, message="Cancelled — stopping transcription.")
             log(f"Transcribing {label}…")
-            segs, detected = self._run_whisper(
+            segs, detected, _words = self._run_whisper(
                 model, wav, language, opts, log, None,
                 recording.duration_seconds, should_cancel,
             )
@@ -434,6 +441,34 @@ class Transcriber:
             recording=recording, segments=all_segments,
             language=language or "", model=opts.model, speakers=speakers,
         )
+
+    def _apply_speakers(self, segments, words, turns, log):
+        """Label the transcript from the diarization turns.
+
+        Per word where word timings exist, so a segment containing a speaker
+        change is split at the change rather than attributed whole. Falls back
+        to per-segment overlap when they do not, which is the old behaviour and
+        still correct for a segment with only one speaker in it.
+        """
+        if words:
+            for word in words:
+                raw = diarization.assign_speaker(word["start"], word["end"], turns)
+                word["speaker_id"] = raw or ""
+            regrouped, speakers = words_to_segments(words, diarized=True)
+            if regrouped:
+                extra = len(regrouped) - len(segments)
+                if extra > 0:
+                    log(
+                        f"Speakers: {len(regrouped)} turn(s) from {len(segments)} "
+                        f"decoded segment(s) — {extra} split where the speaker changed."
+                    )
+                return regrouped, speakers
+
+        mapping = self._stable_speaker_map(turns)
+        for seg in segments:
+            raw = diarization.assign_speaker(seg.start, seg.end, turns)
+            seg.speaker = mapping.get(raw) if raw else None
+        return segments, list(dict.fromkeys(s.speaker for s in segments if s.speaker))
 
     @staticmethod
     def _stable_speaker_map(turns) -> dict[str, str]:
