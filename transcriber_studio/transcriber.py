@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from dataclasses import dataclass
 
 from . import (
@@ -111,6 +112,11 @@ def transcribe_kwargs(opts: TranscribeOptions, language: str | None) -> dict:
             # inside a segment the decoder claims is speech.
             kwargs["hallucination_silence_threshold"] = opts.hallucination_silence_s
     return kwargs
+
+
+#: How often the decoder says how far it has got. Often enough to prove it is
+#: alive, rare enough not to bury the log.
+DECODE_REPORT_SECONDS = 30
 
 
 def _vad_report(info, log) -> None:
@@ -292,6 +298,10 @@ class Transcriber:
         segments_iter, info = model.transcribe(path, **transcribe_kwargs(opts, language))
         _vad_report(info, log)
         out: list[Segment] = []
+        # An hour of audio is many minutes of decoding with nothing to show for
+        # it. Say something periodically, so the log is evidence of work rather
+        # than a gap the user has to interpret.
+        last_report = time.monotonic()
         # faster-whisper decodes lazily, so this loop is where a long
         # transcription can actually be interrupted.
         for seg in segments_iter:
@@ -299,6 +309,12 @@ class Transcriber:
             out.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
             if progress_cb and total_dur:
                 progress_cb(min(0.95, seg.end / total_dur))
+            if total_dur and time.monotonic() - last_report >= DECODE_REPORT_SECONDS:
+                last_report = time.monotonic()
+                log(
+                    f"Transcribed {seg.end / 60:.0f} of {total_dur / 60:.0f} min "
+                    f"({seg.end / total_dur:.0%}) — {len(out)} segment(s) so far."
+                )
         return out, info.language
 
     def _transcribe_single(

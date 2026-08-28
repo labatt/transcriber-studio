@@ -39,6 +39,13 @@ versions follow [Semantic Versioning](https://semver.org/).
 - **Speaker detection can be cancelled.** pyannote runs as one long call; the app now interrupts it
   through the progress hook, and the Cancel button is wired to it. A cancel is also no longer
   swallowed by the handler that skips past a failed diarization.
+- **The progress bar jumped backwards when transcription started.** Fetching and cleaning the audio
+  already own the first 40% of the bar, but the decoder reported its own 0-to-1 over the top of
+  them, so the bar fell to zero and crawled for the longest stage of the job — which reads as
+  stuck. Decoding now maps to the 40-92% it actually owns.
+- **The decoder says how far it has got.** An hour of audio is many minutes with nothing in the log
+  between "Transcribing audio…" and the next stage. It now reports minutes done, percentage and
+  segment count every 30 seconds, so the log is evidence of work rather than a gap.
 - Every ffmpeg conversion has a time limit, so no stage of the pipeline can wait indefinitely.
 
 ### Changed

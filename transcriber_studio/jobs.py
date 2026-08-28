@@ -162,11 +162,15 @@ class JobRunner:
     ) -> TranscriptResult:
         """Produce a transcript result without writing files (for the rename step)."""
         audio_path = self._ensure_audio(recording, progress_cb, log_cb, should_cancel)
+        # Fetching and cleaning the audio already spent the first 40% of the
+        # bar. Without this the decoder reports its own 0..1 over the top of
+        # that, so the bar jumps back to zero and looks stuck for the longest
+        # stage of the job. 0.92 is where AI cleanup takes over.
         return self.transcriber.transcribe(
             recording,
             audio_path,
             self._opts(recording),
-            progress_cb,
+            (lambda f: progress_cb(0.40 + f * 0.52)) if progress_cb else None,
             log_cb,
             should_cancel=should_cancel,
             resume=resume,
