@@ -39,8 +39,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from . import audio_utils
-from .job_cancel import ShouldCancel, check_cancel
+from . import audio_utils, diarization
+from .job_cancel import JobCancelled, ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
 from .word_segments import words_to_segments
 
@@ -390,6 +390,62 @@ def plain_text(response: dict) -> str:
     return "".join(parts).strip() or str(response.get("output_text") or "").strip()
 
 
+def _relabel_from_local_diarization(
+    words: list[dict], audio_path: str, opts, progress_cb, log, should_cancel
+) -> bool:
+    """Replace per-part speaker ids with labels from one pass over the whole file.
+
+    Gemini's speaker numbers only mean anything inside a single request, so
+    across parts they are noise. pyannote runs locally with no length limit, so
+    one pass over the whole recording gives every word a speaker from the same
+    frame of reference. Returns whether it worked.
+    """
+    if not diarization.is_available():
+        log(
+            "Gemini: speaker labels will not be consistent between parts — Gemini "
+            "numbers each request separately, and pyannote is not installed to "
+            "reconcile them. Install pyannote.audio, or keep recordings under an hour."
+        )
+        return False
+    token = (getattr(opts, "hf_token", "") or "").strip()
+    if not token:
+        log(
+            "Gemini: speaker labels will not be consistent between parts — that "
+            "needs a HuggingFace token so speakers can be detected across the whole "
+            "recording at once. Add one in Settings."
+        )
+        return False
+
+    log("Gemini: detecting speakers across the whole recording for consistent labels…")
+    try:
+        turns = diarization.Diarizer(token, getattr(opts, "device", "auto")).diarize(
+            audio_path,
+            getattr(opts, "min_speakers", 0),
+            getattr(opts, "max_speakers", 0),
+            progress_cb=(lambda f: progress_cb(0.72 + f * 0.23)) if progress_cb else None,
+            log_cb=log,
+            should_cancel=should_cancel,
+        )
+    except JobCancelled:
+        raise
+    except Exception as exc:
+        log(f"Gemini: could not detect speakers across the recording ({exc}) — "
+            f"falling back to Gemini's own numbering, which is not consistent "
+            f"between parts.")
+        return False
+
+    if not turns:
+        return False
+    for word in words:
+        if word.get("type") != "word":
+            continue
+        speaker = diarization.assign_speaker(word["start"], word["end"], turns)
+        word["speaker_id"] = speaker or ""
+    log(f"Gemini: {len({t.speaker for t in turns})} speaker(s) across the whole "
+        f"recording — labels are consistent between parts.")
+    return True
+
+
 def _transcribe_in_parts(
     recording, audio_path, opts, config, api_key, model, mode, diarize,
     progress_cb, log, should_cancel,
@@ -400,11 +456,13 @@ def _transcribe_in_parts(
     the whole lot is grouped into turns once, at the end — so a speaker change
     that happens to fall near a seam is still just a speaker change.
 
-    The one thing that cannot be stitched perfectly is speaker identity. Gemini
-    numbers speakers within a request and has no idea the other requests exist,
-    so "Speaker 1" in part two is only probably the same person as in part one.
-    It usually is, in a conversation with a dominant voice, but it is a guess
-    and the log says so.
+    Speaker identity cannot come from Gemini here: it numbers speakers within a
+    request and has no idea the other requests exist, so its "Speaker 1" in part
+    two is unrelated to part one's. There is no enrollment API to tell it
+    otherwise. So when pyannote is available the speakers are taken from a
+    single local pass over the whole recording instead — it has no length limit
+    and no seams, which makes the labels consistent by construction rather than
+    by guesswork. Gemini supplies the words, pyannote supplies who said them.
     """
     with tempfile.TemporaryDirectory(prefix="gemini_parts_") as work:
         parts = audio_utils.split_for_upload(
@@ -437,15 +495,14 @@ def _transcribe_in_parts(
             usage = response.get("usage") or {}
             billed += int(usage.get("total_tokens") or 0)
             if progress_cb:
-                progress_cb(0.05 + 0.9 * index / total)
+                progress_cb(0.05 + 0.67 * index / total)
 
     if words:
-        segments, speakers = words_to_segments(words, diarized=diarize)
         if diarize and total > 1:
-            log(
-                "Gemini: speaker numbers are matched across parts by their order, "
-                "which is a guess — Gemini numbers each request on its own."
+            _relabel_from_local_diarization(
+                words, audio_path, opts, progress_cb, log, should_cancel
             )
+        segments, speakers = words_to_segments(words, diarized=diarize)
     else:
         text = "\n\n".join(prose)
         segments = [Segment(start=0.0, end=0.0, text=text)] if text else []
