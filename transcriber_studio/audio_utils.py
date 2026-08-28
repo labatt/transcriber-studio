@@ -141,3 +141,96 @@ def load_waveform_for_diarization(path: str) -> dict[str, Any]:
         return {"waveform": waveform, "sample_rate": int(sr)}
     finally:
         shutil.rmtree(tmp.parent, ignore_errors=True)
+
+#: How far either side of a target boundary to hunt for a pause to cut on.
+SPLIT_SEARCH_WINDOW = 90.0
+#: Anything quieter than this for long enough counts as a gap between words.
+SILENCE_DB = -30
+SILENCE_SECONDS = 0.35
+
+
+def silence_midpoints(path: str, timeout: float = FFMPEG_TIMEOUT) -> list[float]:
+    """Middle of every detected silence, in seconds, in order.
+
+    Used to choose where to cut a long recording. ffmpeg reports these on
+    stderr as it decodes; there is no cheaper way to ask for them.
+    """
+    result = subprocess.run(
+        [FFMPEG, "-i", path, "-af",
+         f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_SECONDS}", "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace", timeout=timeout,
+    )
+    starts: list[float] = []
+    midpoints: list[float] = []
+    for line in (result.stderr or "").splitlines():
+        if "silence_start:" in line:
+            try:
+                starts.append(float(line.split("silence_start:")[1].split()[0]))
+            except (ValueError, IndexError):
+                continue
+        elif "silence_end:" in line and starts:
+            try:
+                end = float(line.split("silence_end:")[1].split()[0])
+            except (ValueError, IndexError):
+                continue
+            midpoints.append((starts.pop() + end) / 2)
+    return sorted(midpoints)
+
+
+def split_points(duration: float, target: float, quiet: list[float]) -> list[float]:
+    """Cut times for a recording, nudged onto a pause where one is near.
+
+    Cutting on a fixed clock lands mid-word twice an hour and garbles a word
+    at every seam. A pause within a minute and a half of the target is worth
+    far more than an exact boundary.
+    """
+    points: list[float] = []
+    position = 0.0
+    while duration - position > target:
+        target_at = position + target
+        nearby = [
+            q for q in quiet
+            if abs(q - target_at) <= SPLIT_SEARCH_WINDOW and q > position + 60
+        ]
+        cut = min(nearby, key=lambda q: abs(q - target_at)) if nearby else target_at
+        points.append(cut)
+        position = cut
+    return points
+
+
+def split_for_upload(
+    path: str, target_seconds: float, out_dir: str, log=None, timeout: float = FFMPEG_TIMEOUT
+) -> list[tuple[str, float]]:
+    """Cut a recording into uploadable parts. Returns (path, start offset).
+
+    The offset is what puts each part's timestamps back onto the original
+    timeline once the parts come back transcribed.
+    """
+    info = probe(path)
+    duration = float(info.get("duration") or 0.0)
+    if duration <= target_seconds:
+        return [(path, 0.0)]
+
+    try:
+        quiet = silence_midpoints(path, timeout=timeout)
+    except (subprocess.SubprocessError, OSError):
+        quiet = []          # no pauses found is not fatal; cut on the clock
+    cuts = split_points(duration, target_seconds, quiet)
+    if log:
+        landed = sum(1 for c in cuts if any(abs(c - q) < 0.01 for q in quiet))
+        log(f"Splitting into {len(cuts) + 1} part(s) — {landed} of {len(cuts)} "
+            f"cut(s) landed on a pause.")
+
+    bounds = [0.0, *cuts, duration]
+    suffix = Path(path).suffix or ".wav"
+    parts: list[tuple[str, float]] = []
+    for index in range(len(bounds) - 1):
+        start, end = bounds[index], bounds[index + 1]
+        part = Path(out_dir) / f"part{index:03d}{suffix}"
+        subprocess.run(
+            [FFMPEG, "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+             "-i", path, "-c", "copy", str(part)],
+            capture_output=True, check=True, timeout=timeout,
+        )
+        parts.append((str(part), start))
+    return parts

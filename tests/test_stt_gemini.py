@@ -186,10 +186,8 @@ def test_the_ceiling_is_the_measured_one_not_the_documented_one():
     assert 50 <= g.PRACTICAL_MINUTES_WITH_FEATURES <= 56
 
 
-def test_a_recording_over_the_ceiling_is_refused_before_it_is_uploaded():
-    """Uploading 150 MB to be told "Invalid input received." helps nobody."""
-    import pytest
-
+def test_a_recording_over_the_ceiling_goes_through_in_parts():
+    """Too long for one request is not too long for the engine."""
     from transcriber_studio.models import Recording, Source
 
     rec = Recording(source=Source.LOCAL, id="long.mp3", name="long",
@@ -197,18 +195,61 @@ def test_a_recording_over_the_ceiling_is_refused_before_it_is_uploaded():
                     duration_seconds=80 * 60)
     opts = TranscribeOptions(gemini_api_key="k", gemini_mode="verbatim",
                              diarization_enabled=True)
-    sent = []
-    original, g.upload = g.upload, lambda *a, **k: sent.append(a) or "uri"
-    try:
-        with pytest.raises(g.GeminiError) as caught:
-            g.transcribe(rec, "long.mp3", opts)
-    finally:
-        g.upload = original
 
-    assert not sent, "it uploaded the file before finding out it was too long"
-    message = str(caught.value)
-    assert "80 minutes" in message
-    assert "split" in message.lower()
+    # Two parts, the second starting half an hour in.
+    parts = [("a.mp3", 0.0), ("b.mp3", 1800.0)]
+    responses = [
+        {"steps": [{"content": [{"text": "one two", "annotations": [
+            {"type": "word_info", "text": "one", "start_offset": "0s",
+             "end_offset": "1s", "speaker": "1", "start_index": 0, "end_index": 3},
+            {"type": "word_info", "text": "two", "start_offset": "1s",
+             "end_offset": "2s", "speaker": "1", "start_index": 4, "end_index": 7},
+        ]}]}]},
+        {"steps": [{"content": [{"text": "three", "annotations": [
+            {"type": "word_info", "text": "three", "start_offset": "5s",
+             "end_offset": "6s", "speaker": "1", "start_index": 0, "end_index": 5},
+        ]}]}]},
+    ]
+    uploaded = []
+    saved = (g.audio_utils.split_for_upload, g.upload, g._post_interaction)
+    g.audio_utils.split_for_upload = lambda *a, **k: parts
+    g.upload = lambda path, *a, **k: uploaded.append(path) or f"uri:{path}"
+    g._post_interaction = lambda *a, **k: responses[len(uploaded) - 1]
+    try:
+        result = g.transcribe(rec, "long.mp3", opts)
+    finally:
+        g.audio_utils.split_for_upload, g.upload, g._post_interaction = saved
+
+    assert uploaded == ["a.mp3", "b.mp3"], "it did not send both parts"
+    words = " ".join(s.text for s in result.segments)
+    assert "one two" in words and "three" in words
+    # The second part's 5s is 30m05s on the real timeline, not 5s.
+    assert result.segments[-1].start == 1805.0
+
+
+def test_split_points_cuts_on_the_clock_when_there_is_no_pause():
+    from transcriber_studio.audio_utils import split_points
+
+    assert split_points(5400, 1800, []) == [1800, 3600]
+
+
+def test_split_points_prefers_a_nearby_pause():
+    """A cut landing mid-word garbles a word at every seam."""
+    from transcriber_studio.audio_utils import split_points
+
+    assert split_points(3000, 1800, [1755.0]) == [1755.0]
+
+
+def test_split_points_ignores_a_pause_that_is_nowhere_near():
+    from transcriber_studio.audio_utils import split_points
+
+    assert split_points(3000, 1800, [600.0]) == [1800]
+
+
+def test_a_recording_under_the_target_is_not_split():
+    from transcriber_studio.audio_utils import split_points
+
+    assert split_points(1200, 1800, []) == []
 
 
 def test_smart_mode_gets_the_full_hour():

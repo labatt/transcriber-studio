@@ -56,6 +56,16 @@ versions follow [Semantic Versioning](https://semver.org/).
   segment count every 30 seconds, so the log is evidence of work rather than a gap.
 - Every ffmpeg conversion has a time limit, so no stage of the pipeline can wait indefinitely.
 
+- **Gemini transcribes recordings of any length**, by cutting them into 30-minute parts and joining
+  the results. Google documents a 30-minute ceiling and does not enforce it: probing
+  gemini-3.5-transcribe in verbatim mode with diarization, 54 minutes was accepted and 57 was
+  refused with a bare "Invalid input received." — the same refusal for a 152 MB wav and a 38 MB mp3
+  of the same audio, so it is duration, not size. Parts are cut at a pause near the boundary rather
+  than on the clock, so a word is not sliced in half at every seam, and each part's timings are
+  shifted back onto the original timeline before the whole transcript is grouped into turns.
+  Speaker numbers are matched across parts by order, which the log is explicit about being a guess:
+  Gemini numbers speakers within a request and cannot know about the others.
+
 ### Changed
 
 - The manual install instructions cover Windows, macOS and Linux rather than assuming `winget`.

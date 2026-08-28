@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+from . import audio_utils
 from .job_cancel import ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
 from .word_segments import words_to_segments
@@ -92,6 +94,11 @@ MAX_MINUTES_WITH_FEATURES = 30
 #: Conservative by a couple of minutes, because the boundary was bracketed
 #: rather than pinned exactly and may move.
 PRACTICAL_MINUTES_WITH_FEATURES = 54
+
+#: What a recording over the ceiling is cut into. Comfortably under the wall
+#: rather than right up against it, because the boundary was bracketed rather
+#: than pinned and Google can move it without telling anyone.
+UPLOAD_CHUNK_MINUTES = 30
 
 READ_TIMEOUT = 1800         # a long recording takes minutes to come back
 UPLOAD_TIMEOUT = 900
@@ -383,6 +390,83 @@ def plain_text(response: dict) -> str:
     return "".join(parts).strip() or str(response.get("output_text") or "").strip()
 
 
+def _transcribe_in_parts(
+    recording, audio_path, opts, config, api_key, model, mode, diarize,
+    progress_cb, log, should_cancel,
+) -> TranscriptResult:
+    """Transcribe a recording too long for one request, as parts.
+
+    Each part's word timings are shifted back onto the original timeline and
+    the whole lot is grouped into turns once, at the end — so a speaker change
+    that happens to fall near a seam is still just a speaker change.
+
+    The one thing that cannot be stitched perfectly is speaker identity. Gemini
+    numbers speakers within a request and has no idea the other requests exist,
+    so "Speaker 1" in part two is only probably the same person as in part one.
+    It usually is, in a conversation with a dominant voice, but it is a guess
+    and the log says so.
+    """
+    with tempfile.TemporaryDirectory(prefix="gemini_parts_") as work:
+        parts = audio_utils.split_for_upload(
+            audio_path, UPLOAD_CHUNK_MINUTES * 60, work,
+            log=lambda m: log(f"Gemini: {m}"),
+        )
+        total = len(parts)
+        words: list[dict] = []
+        prose: list[str] = []
+        billed = 0
+
+        for index, (part_path, offset) in enumerate(parts, start=1):
+            check_cancel(should_cancel, log, message="Gemini: cancelled.")
+            log(f"Gemini: part {index}/{total} ({offset / 60:.0f}–"
+                f"{(offset / 60) + UPLOAD_CHUNK_MINUTES:.0f} min)…")
+            uri = upload(part_path, api_key, log, should_cancel)
+            response = _post_interaction(
+                uri, mime_type_for(part_path), opts, api_key, log, should_cancel
+            )
+            part_words = word_annotations(response)
+            for word in part_words:
+                if word.get("type") == "word":
+                    word["start"] = float(word.get("start", 0.0)) + offset
+                    word["end"] = float(word.get("end", 0.0)) + offset
+            words.extend(part_words)
+            if not part_words:
+                text = plain_text(response)
+                if text:
+                    prose.append(text)
+            usage = response.get("usage") or {}
+            billed += int(usage.get("total_tokens") or 0)
+            if progress_cb:
+                progress_cb(0.05 + 0.9 * index / total)
+
+    if words:
+        segments, speakers = words_to_segments(words, diarized=diarize)
+        if diarize and total > 1:
+            log(
+                "Gemini: speaker numbers are matched across parts by their order, "
+                "which is a guess — Gemini numbers each request on its own."
+            )
+    else:
+        text = "\n\n".join(prose)
+        segments = [Segment(start=0.0, end=0.0, text=text)] if text else []
+        speakers = []
+        if not text:
+            log("Gemini: nothing was transcribed — the audio may contain no speech.")
+
+    if billed:
+        log(f"Gemini: {billed:,} tokens billed across {total} part(s).")
+    log(f"Gemini: {len(segments)} segment(s), {len(speakers)} speaker(s).")
+    if progress_cb:
+        progress_cb(1.0)
+    return TranscriptResult(
+        recording=recording,
+        segments=segments,
+        language=getattr(opts, "language", "") if getattr(opts, "language", "auto") != "auto" else "",
+        model=model_label(model),
+        speakers=speakers,
+    )
+
+
 # ---- the engine entry point --------------------------------------------
 def transcribe(
     recording: Recording,
@@ -419,14 +503,13 @@ def transcribe(
     minutes = (recording.duration_seconds or 0) / 60
     ceiling = length_ceiling(config)
     if minutes > ceiling:
-        # Refusing here rather than uploading a hundred megabytes to be told
-        # "Invalid input received." with nothing to act on.
-        raise GeminiError(
-            f"This recording is {minutes:.0f} minutes and Gemini refuses anything "
-            f"over about {ceiling} in {mode} mode — it answers a longer one with "
-            f'"Invalid input received." and no explanation.\n\n'
-            f"Either split the recording and run the parts separately, or use the "
-            f"local Whisper engine, which has no length limit."
+        log(
+            f"Gemini: {minutes:.0f} min is past the ~{ceiling} min this API accepts — "
+            f"transcribing it in {UPLOAD_CHUNK_MINUTES} min parts and joining them up."
+        )
+        return _transcribe_in_parts(
+            recording, audio_path, opts, config, api_key, model, mode, diarize,
+            progress_cb, log, should_cancel,
         )
     if not recording.duration_seconds:
         # Nothing to check against; the API is the only thing that will say no.

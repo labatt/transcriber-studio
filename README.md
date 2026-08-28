@@ -88,6 +88,9 @@ there is no configuration that quietly does nothing.
   every stage can be cancelled while it runs. The transcription is banked before speaker detection
   begins, so a failure there costs you the labels, not the words. Closing the lid mid-job costs you
   the current chunk, not the job.
+- **No length limit on cloud transcription** — Gemini refuses anything much over 54 minutes, so
+  longer recordings are cut at a pause into 30-minute parts, transcribed separately and stitched
+  back onto one timeline.
 - **Components window** — what's installed, what's newer, and buttons to update it.
 - **Output formats** — `txt`, `srt`, `vtt`, `json`, `md`, with a filename template builder.
 
