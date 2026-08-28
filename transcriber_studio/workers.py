@@ -77,6 +77,14 @@ class DiarizationWorker(QThread):
         self.settings = settings
         self.row = row
         self.result = result
+        self._cancel = False
+
+    def cancel(self):
+        """Stop mid-diarization. pyannote reports progress often enough to act on."""
+        self._cancel = True
+
+    def was_cancelled(self) -> bool:
+        return self._cancel
 
     def run(self):
         runner = JobRunner(self.settings)
@@ -86,10 +94,14 @@ class DiarizationWorker(QThread):
                 self.result.transcript,
                 progress_cb=lambda f, r=row: self.progress_item.emit(r, f),
                 log_cb=lambda m, r=row: self.log_item.emit(r, m),
+                should_cancel=lambda: self._cancel,
             )
             paths = runner.write_outputs(self.result.transcript, index=row + 1)
             self.result.output_paths = paths
             self.done.emit(row, self.result)
+        except JobCancelled:
+            # Asking to stop is not an error; the transcript is untouched.
+            self.error.emit(row, "Speaker detection cancelled — the transcript is unchanged.")
         except Exception as e:
             self.error.emit(row, str(e))
 

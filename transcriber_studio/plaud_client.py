@@ -353,6 +353,11 @@ class PlaudClient:
         Streams to a .part file and only moves it into place once complete, so
         a cancelled or crashed download never leaves a truncated file that a
         later run would mistake for cached audio.
+
+        The .part file is kept, not deleted, and the next attempt asks the
+        server to carry on from where it stopped. An hour-long recording
+        interrupted at ninety percent used to start again from nothing, which
+        is a long way to fall for a laptop closing its lid.
         """
         url = self.audio_url(file_id, log_cb=log_cb)
         if not url:
@@ -371,12 +376,23 @@ class PlaudClient:
                 "Plaud app to let it sync, then press Refresh and run it again."
             )
         partial = Path(f"{dest_path}.part")
+        already = partial.stat().st_size if partial.exists() else 0
+        headers = {"Range": f"bytes={already}-"} if already else {}
+        if already and log_cb:
+            log_cb(f"Resuming download at {already / 1e6:.1f} MB.")
         try:
-            with requests.get(url, stream=True, timeout=120) as r:
+            with requests.get(url, stream=True, timeout=120, headers=headers) as r:
                 r.raise_for_status()
-                total = int(r.headers.get("Content-Length", 0))
-                done = 0
-                with open(partial, "wb") as fh:
+                # 206 means it honoured the range; anything else means it is
+                # sending the file from the top and the old bytes are useless.
+                resumed = r.status_code == 206 and already > 0
+                if not resumed and already:
+                    if log_cb:
+                        log_cb("The server would not resume — starting the download again.")
+                    already = 0
+                total = int(r.headers.get("Content-Length", 0)) + already
+                done = already
+                with open(partial, "ab" if resumed else "wb") as fh:
                     for chunk in r.iter_content(chunk_size=1 << 16):
                         check_cancel(should_cancel, message="Download cancelled.")
                         if not chunk:
@@ -387,6 +403,7 @@ class PlaudClient:
                             progress_cb(done / total)
             partial.replace(dest_path)
         except BaseException:
-            partial.unlink(missing_ok=True)
+            # Deliberately left on disk: it is the head start for next time,
+            # and .part is never mistaken for the finished file.
             raise
         return dest_path

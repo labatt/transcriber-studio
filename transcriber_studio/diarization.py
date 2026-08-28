@@ -9,9 +9,22 @@ pyannote/speaker-diarization-community-1 model terms accepted.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import audio_utils
+from .config import APP_DIR
+from .job_cancel import check_cancel
+
+#: Diarizing an hour of audio is minutes of GPU work that produces a few
+#: kilobytes of turns. Keeping them means a run interrupted afterwards — or one
+#: the user starts again with different cleanup settings — never pays for it
+#: twice. Keyed by audio content and speaker bounds, so any change re-runs it.
+CACHE_DIR = APP_DIR / "diarization_cache"
+CACHE_KEEP = 24
 
 # pyannote 4.x recommended pipeline; pulls in segmentation + community assets.
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
@@ -63,6 +76,73 @@ class SpeakerTurn:
     start: float
     end: float
     speaker: str  # raw label like SPEAKER_00
+
+
+def cache_key(audio_path: str, min_speakers: int, max_speakers: int) -> str:
+    """Same audio and same speaker bounds — same turns."""
+    source = Path(audio_path)
+    try:
+        stat = source.stat()
+        stamp = f"{stat.st_size}:{int(stat.st_mtime)}"
+    except OSError:
+        stamp = "0:0"
+    material = "|".join([
+        str(source.resolve()), stamp, DIARIZATION_MODEL,
+        str(min_speakers), str(max_speakers),
+    ])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def cache_path(audio_path: str, min_speakers: int, max_speakers: int) -> Path:
+    return CACHE_DIR / f"{cache_key(audio_path, min_speakers, max_speakers)}.json"
+
+
+def load_cached(path: Path) -> list[SpeakerTurn] | None:
+    """Turns from an earlier run, or None if there are none worth trusting."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [
+            SpeakerTurn(start=float(t["start"]), end=float(t["end"]), speaker=str(t["speaker"]))
+            for t in data
+        ]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None    # unreadable or half-written: just diarize again
+
+
+def save_cached(path: Path, turns: list[SpeakerTurn]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps([{"start": t.start, "end": t.end, "speaker": t.speaker} for t in turns]),
+            encoding="utf-8",
+        )
+        tmp.replace(path)    # never leave a half-written file where a read looks
+    except OSError:
+        pass    # a cache that cannot be written is not a reason to fail the job
+
+
+def prune(keep: int = CACHE_KEEP) -> list[Path]:
+    """Drop all but the most recent cached results. Returns what was removed."""
+    if not CACHE_DIR.exists():
+        return []
+    files = sorted(CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = []
+    for path in files[keep:]:
+        try:
+            path.unlink()
+            removed.append(path)
+        except OSError:
+            continue
+    for stale in CACHE_DIR.glob("*.json.tmp"):
+        try:
+            if stale.stat().st_mtime < time.time() - 3600:
+                stale.unlink()
+        except OSError:
+            continue
+    return removed
 
 
 def is_available() -> bool:
@@ -119,11 +199,13 @@ class _UiProgressHook:
         *,
         base: float = 0.12,
         span: float = 0.86,
+        should_cancel=None,
     ):
         self.progress_cb = progress_cb
         self.log_cb = log_cb
         self.base = base
         self.span = span
+        self.should_cancel = should_cancel
         self._steps: list[str] = []
         self._step_name: str | None = None
 
@@ -141,6 +223,10 @@ class _UiProgressHook:
         total: int | None = None,
         completed: int | None = None,
     ):
+        # pyannote calls its hook throughout every step, which makes this the
+        # one place a long diarization can be interrupted. Without it, Cancel
+        # did nothing until the whole pipeline finished on its own.
+        check_cancel(self.should_cancel, self.log_cb, message="Diarization: cancelled.")
         if completed is None:
             completed = total = 1
         total = total or 1
@@ -231,7 +317,21 @@ class Diarizer:
         max_speakers: int = 0,
         progress_cb=None,
         log_cb=None,
+        should_cancel=None,
     ) -> list[SpeakerTurn]:
+        cached_at = cache_path(audio_path, min_speakers, max_speakers)
+        cached = load_cached(cached_at)
+        if cached is not None:
+            if log_cb:
+                log_cb(
+                    f"Reusing speaker detection from an earlier run — "
+                    f"{len({t.speaker for t in cached})} speaker(s), nothing to redo."
+                )
+            if progress_cb:
+                progress_cb(1.0)
+            return cached
+
+        check_cancel(should_cancel, log_cb, message="Diarization: cancelled.")
         pipeline = self._load(log_cb=log_cb)
         kwargs = {}
         if min_speakers:
@@ -248,10 +348,14 @@ class Diarizer:
             log_cb(f"Analyzing {minutes:.1f} min of audio for speakers…")
         if progress_cb:
             progress_cb(0.08)
-        hook = _UiProgressHook(progress_cb, log_cb, base=0.10, span=0.88)
+        hook = _UiProgressHook(
+            progress_cb, log_cb, base=0.10, span=0.88, should_cancel=should_cancel
+        )
         with hook:
             output = pipeline(audio, hook=hook, **kwargs)
         turns = _turns_from_pipeline_output(output)
+        save_cached(cached_at, turns)
+        prune()
         if log_cb:
             log_cb(f"Found {len({t.speaker for t in turns})} speaker(s).")
         if progress_cb:

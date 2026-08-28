@@ -46,6 +46,18 @@ PIPELINE_SAMPLE_RATE = 16_000
 #: What DeepFilterNet operates at.
 DF_SAMPLE_RATE = 48_000
 
+#: Denoise this many seconds at a time rather than handing over a whole
+#: recording. Measured at roughly 5–8x realtime, so a chunk this size takes
+#: about 25 seconds: long enough that the model's start-up cost is noise,
+#: short enough to report progress, stay cancellable, and keep memory flat.
+#: A whole 80-minute file was 1.8 GB resident and produced nothing at all.
+CHUNK_SECONDS = 120
+#: A chunk that has not finished in this multiple of its own duration is not
+#: slow, it is stuck. Roughly forty times the measured rate, so a genuinely
+#: slow machine is never cut off, but a wedged process cannot hang the job.
+CHUNK_TIMEOUT_FACTOR = 8
+MIN_CHUNK_TIMEOUT = 90.0
+
 AUTO = "auto"
 DEEP_FILTER = "deep_filter"
 PYTHON_DF = "deepfilternet"
@@ -166,6 +178,7 @@ def enhance(
     settings: Settings,
     *,
     log_cb=None,
+    progress_cb=None,
     should_cancel: ShouldCancel = None,
 ) -> str:
     """Return a denoised copy of ``path``, or ``path`` itself if that is not on.
@@ -202,13 +215,17 @@ def enhance(
         else:
             wav48 = _convert(path, work / "in48.wav", DF_SAMPLE_RATE, should_cancel, log)
             if backend == DEEP_FILTER:
-                enhanced = _deep_filter_binary(wav48, work, settings, should_cancel, log)
+                enhanced = _deep_filter_binary(
+                    wav48, work, settings, should_cancel, log, progress_cb,
+                    store=chunk_store(path, backend, settings),
+                )
             else:
                 enhanced = _deep_filter_python(wav48, work, settings, log)
             produced = _convert(
                 enhanced, work / "out16.wav", PIPELINE_SAMPLE_RATE, should_cancel, log
             )
         _store(produced, cached)
+        shutil.rmtree(chunk_store(path, backend, settings), ignore_errors=True)
     except JobCancelled:
         raise
     except Exception as e:
@@ -272,29 +289,131 @@ def deep_filter_command(
     return cmd
 
 
-def _deep_filter_binary(source: Path, work: Path, settings: Settings, should_cancel, log) -> Path:
+def chunk_store(path: str, backend: str, settings: Settings) -> Path:
+    """Where finished chunks for one recording live between runs.
+
+    Denoising a long recording is minutes of work that a sleeping laptop can
+    interrupt, and the tool writes nothing until it has finished the whole
+    file — so without this, every interruption starts again from zero.
+    """
+    return CACHE_DIR / f"{cache_key(path, backend, settings)}.chunks"
+
+
+def chunk_timeout(seconds: float) -> float:
+    """How long a chunk of this length is allowed before it counts as stuck."""
+    return max(MIN_CHUNK_TIMEOUT, seconds * CHUNK_TIMEOUT_FACTOR)
+
+
+def split_into_chunks(source: Path, work: Path, should_cancel, log) -> list[Path]:
+    """Cut the 48 kHz audio into fixed-length pieces for the denoiser."""
+    parts = work / "parts"
+    parts.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            FFMPEG, "-y", "-i", str(source),
+            "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
+            "-c", "copy", str(parts / "part%05d.wav"),
+        ],
+        should_cancel, log, "splitting the audio",
+    )
+    return sorted(parts.glob("part*.wav"))
+
+
+def _deep_filter_binary(
+    source: Path, work: Path, settings: Settings, should_cancel, log, progress_cb=None,
+    store: Path | None = None,
+) -> Path:
+    """Denoise in chunks, so progress is visible and a stall costs one chunk.
+
+    A chunk that fails or wedges falls back to its own original audio: the
+    output stays complete and correctly timed, just less clean in that stretch.
+    Losing two minutes of noise reduction beats losing the recording.
+
+    Finished chunks are kept in ``store`` between runs. deep-filter writes
+    nothing until it has processed an entire file, so without this an interrupted
+    run — a laptop going to sleep mid-recording, say — throws away everything it
+    had done and starts from the beginning.
+    """
     binary = binary_path(settings.deep_filter_path)
     if not binary:
         raise RuntimeError("deep-filter binary disappeared between the check and the run.")
+
+    chunks = split_into_chunks(source, work, should_cancel, log)
+    if not chunks:
+        raise RuntimeError("Splitting the audio produced nothing to denoise.")
+
     out_dir = work / "df"
     out_dir.mkdir(parents=True, exist_ok=True)
-    _run(
-        deep_filter_command(
-            binary, source, out_dir,
-            model_path=settings.denoise_model_path,
-            postfilter=settings.denoise_postfilter,
-            atten_lim_db=settings.denoise_atten_lim_db,
-        ),
-        should_cancel, log, "deep-filter",
+    if store is not None:
+        store.mkdir(parents=True, exist_ok=True)
+    total = len(chunks)
+    if total > 1:
+        log(f"Denoise: {total} chunk(s) of up to {CHUNK_SECONDS}s.")
+
+    cleaned: list[Path] = []
+    degraded = 0
+    reused = 0
+    for index, chunk in enumerate(chunks, start=1):
+        check_cancel(should_cancel, log, message="Denoise: cancelled.")
+        kept = (store / chunk.name) if store is not None else None
+        if kept is not None and kept.exists():
+            cleaned.append(kept)
+            reused += 1
+            if progress_cb:
+                progress_cb(index / total)
+            continue
+
+        seconds = probe(str(chunk)).get("duration") or CHUNK_SECONDS
+        try:
+            _run(
+                deep_filter_command(
+                    binary, chunk, out_dir,
+                    model_path=settings.denoise_model_path,
+                    postfilter=settings.denoise_postfilter,
+                    atten_lim_db=settings.denoise_atten_lim_db,
+                ),
+                should_cancel, log, f"deep-filter chunk {index}/{total}",
+                timeout=chunk_timeout(seconds),
+            )
+            produced = out_dir / chunk.name
+            result = produced if produced.exists() else chunk
+            if kept is not None and produced.exists():
+                shutil.copy2(str(produced), str(kept))
+                result = kept
+            cleaned.append(result)
+        except JobCancelled:
+            raise
+        except (DenoiseTimeout, RuntimeError) as exc:
+            degraded += 1
+            log(f"Denoise: chunk {index}/{total} kept as recorded — {exc}")
+            cleaned.append(chunk)
+        if progress_cb:
+            progress_cb(index / total)
+        if total > 1 and (index % 5 == 0 or index == total):
+            log(f"Denoise: {index}/{total} chunks done.")
+
+    if reused:
+        log(f"Denoise: {reused} chunk(s) reused from an interrupted run — no work repeated.")
+    if degraded:
+        log(f"Denoise: {degraded} of {total} chunk(s) could not be cleaned and were kept as-is.")
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return _concat(cleaned, work, should_cancel, log)
+
+
+def _concat(parts: list[Path], work: Path, should_cancel, log) -> Path:
+    """Join the denoised chunks back into one file, in order."""
+    listing = work / "parts.txt"
+    listing.write_text(
+        "".join(f"file '{p.as_posix()}'\n" for p in parts), encoding="utf-8"
     )
-    # It writes one file per input, keeping the input's name.
-    produced = out_dir / source.name
-    if produced.exists():
-        return produced
-    candidates = sorted(out_dir.glob("*.wav"))
-    if not candidates:
-        raise RuntimeError("deep-filter wrote no output file.")
-    return candidates[0]
+    joined = work / "denoised48.wav"
+    _run(
+        [FFMPEG, "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+         "-c", "copy", str(joined)],
+        should_cancel, log, "joining the chunks",
+    )
+    return joined
 
 
 def _deep_filter_python(source: Path, work: Path, settings: Settings, log) -> Path:
@@ -330,29 +449,58 @@ def _convert(source, dest: Path, rate: int, should_cancel, log) -> Path:
     return dest
 
 
-def _run(cmd: list[str], should_cancel: ShouldCancel, log, what: str) -> None:
-    """Run a converter, staying interruptible while it works."""
+class DenoiseTimeout(RuntimeError):
+    """A stage that stopped making progress and had to be abandoned."""
+
+
+def _run(
+    cmd: list[str],
+    should_cancel: ShouldCancel,
+    log,
+    what: str,
+    timeout: float | None = None,
+) -> None:
+    """Run a converter, staying interruptible, and never waiting forever.
+
+    The timeout is the important part. Without one, a child that wedges — which
+    is exactly what a suspend/resume cycle can do to it — leaves the job sitting
+    with no progress, no error and no way out but Cancel. One did precisely
+    that for eight hours: it read its whole input, wrote nothing, and sat at one
+    percent of a core while the app waited on poll().
+    """
     check_cancel(should_cancel, log, message=f"Denoise: cancelled before {what}.")
-    process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
-    )
+    # Output goes to a file rather than a pipe nobody drains: a pipe buffer that
+    # fills is its own way to deadlock a child.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as sink:
+        process = subprocess.Popen(cmd, stdout=sink, stderr=subprocess.STDOUT)
+        deadline = (time.monotonic() + timeout) if timeout else None
+        try:
+            while process.poll() is None:
+                if should_cancel and should_cancel():
+                    _stop(process)
+                    raise JobCancelled(f"Denoise: cancelled during {what}.")
+                if deadline and time.monotonic() > deadline:
+                    _stop(process)
+                    raise DenoiseTimeout(
+                        f"{what} made no progress in {timeout:.0f}s and was stopped."
+                    )
+                time.sleep(0.2)
+        finally:
+            if process.poll() is None:
+                process.kill()
+        if process.returncode != 0:
+            sink.seek(0)
+            output = sink.read().strip()
+            tail = output.splitlines()[-1] if output else "no output"
+            raise RuntimeError(f"{what} failed (exit {process.returncode}): {tail}")
+
+
+def _stop(process: subprocess.Popen) -> None:
+    process.terminate()
     try:
-        while process.poll() is None:
-            if should_cancel and should_cancel():
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                raise JobCancelled(f"Denoise: cancelled during {what}.")
-            time.sleep(0.2)
-    finally:
-        if process.poll() is None:
-            process.kill()
-    if process.returncode != 0:
-        stderr = (process.stderr.read() if process.stderr else "") or ""
-        tail = stderr.strip().splitlines()[-1] if stderr.strip() else "no output"
-        raise RuntimeError(f"{what} failed (exit {process.returncode}): {tail}")
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
 
 
 def cache_key(path: str, backend: str, settings: Settings) -> str:
@@ -398,13 +546,23 @@ def prune(keep: int = CACHE_KEEP) -> list[Path]:
             removed.append(path)
         except OSError:
             continue
+    # Part-done chunk sets from runs that never finished. Anything still being
+    # worked on was touched in the last hour, so it is left alone.
+    cutoff = time.time() - 3600
+    for directory in CACHE_DIR.glob("*.chunks"):
+        try:
+            if directory.stat().st_mtime < cutoff:
+                shutil.rmtree(directory, ignore_errors=True)
+                removed.append(directory)
+        except OSError:
+            continue
     return removed
 
 
 def cache_size_bytes() -> int:
     if not CACHE_DIR.exists():
         return 0
-    return sum(p.stat().st_size for p in CACHE_DIR.glob("*.wav"))
+    return sum(p.stat().st_size for p in CACHE_DIR.rglob("*.wav"))
 
 
 def clear_cache() -> None:

@@ -19,6 +19,23 @@ versions follow [Semantic Versioning](https://semver.org/).
   package manager it downloads what it needs directly, including a static ffmpeg build on Windows
   and the DeepFilterNet binary for the running platform.
 
+### Fixed
+
+- **A job could sit forever after a suspend/resume.** DeepFilterNet processes a whole recording in
+  one pass and writes nothing until it finishes, so a machine sleeping mid-run left the app waiting
+  on a child that had stopped making progress, with no error, no progress and no way out but
+  Cancel. Denoising now runs in two-minute chunks with a timeout on each, reports progress as it
+  goes, and a chunk that stalls falls back to its own original audio — the recording stays complete
+  and correctly timed, just less clean over that stretch.
+- **Interrupted work is no longer thrown away.** Finished denoise chunks are kept between runs, so
+  restarting an interrupted job resumes instead of starting over. Speaker turns are cached the same
+  way. Downloads keep their partial file and resume with an HTTP range request rather than
+  re-fetching an hour-long recording from the beginning.
+- **Speaker detection can be cancelled.** pyannote runs as one long call; the app now interrupts it
+  through the progress hook, and the Cancel button is wired to it. A cancel is also no longer
+  swallowed by the handler that skips past a failed diarization.
+- Every ffmpeg conversion has a time limit, so no stage of the pipeline can wait indefinitely.
+
 ### Changed
 
 - The manual install instructions cover Windows, macOS and Linux rather than assuming `winget`.

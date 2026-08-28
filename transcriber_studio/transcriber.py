@@ -310,7 +310,6 @@ class Transcriber:
 
         speakers_order: list[str] = []
         if opts.diarization_enabled and diarization.is_available():
-            # pyannote runs as one uninterruptible call — check before committing to it.
             check_cancel(should_cancel, log, message="Cancelled — skipping diarization.")
             log("Running speaker diarization…")
             try:
@@ -321,6 +320,7 @@ class Transcriber:
                     opts.max_speakers,
                     progress_cb=(lambda f: progress_cb(0.95 + f * 0.05)) if progress_cb else None,
                     log_cb=log,
+                    should_cancel=should_cancel,
                 )
                 mapping = self._stable_speaker_map(turns)
                 for seg in segments:
@@ -329,6 +329,10 @@ class Transcriber:
                 speakers_order = list(dict.fromkeys(
                     s.speaker for s in segments if s.speaker
                 ))
+            except JobCancelled:
+                # Diarization failing is survivable and the transcript is still
+                # worth having; the user pressing Cancel is neither.
+                raise
             except Exception as e:
                 log(f"Diarization skipped: {e}")
         elif opts.diarization_enabled:

@@ -8,7 +8,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from transcriber_studio import denoise, glossary_store, history
+from transcriber_studio import denoise, diarization, glossary_store, history
 from transcriber_studio import resume as resume_store
 
 
@@ -80,3 +80,15 @@ def isolated_denoise_cache():
             yield denoise.CACHE_DIR
         finally:
             denoise.CACHE_DIR = original
+
+
+@contextmanager
+def isolated_diarization_cache():
+    """Keep cached speaker turns out of the real cache during tests."""
+    original = diarization.CACHE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        diarization.CACHE_DIR = Path(tmp) / "diarization"
+        try:
+            yield diarization.CACHE_DIR
+        finally:
+            diarization.CACHE_DIR = original

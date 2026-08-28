@@ -48,6 +48,11 @@ FFPROBE = _Tool("ffprobe")
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma", ".mp4", ".m4b"}
 
+#: Ceiling on any single ffmpeg conversion. Generous — a two-hour recording
+#: converts in a couple of minutes — but bounded, because a subprocess with no
+#: timeout is a job that can sit forever with nothing to show and no way out.
+FFMPEG_TIMEOUT = 1800
+
 DIARIZATION_SAMPLE_RATE = 16000
 
 
@@ -95,7 +100,7 @@ def split_channels(path: str, names: list[str] | None = None) -> list[tuple[str,
         out = tmpdir / "mono.wav"
         subprocess.run(
             [FFMPEG, "-y", "-i", path, "-ac", "1", "-ar", "16000", str(out)],
-            capture_output=True, check=True,
+            capture_output=True, check=True, timeout=FFMPEG_TIMEOUT,
         )
         return [("mono", str(out))]
 
@@ -107,7 +112,7 @@ def split_channels(path: str, names: list[str] | None = None) -> list[tuple[str,
             [FFMPEG, "-y", "-i", path,
              "-filter_complex", f"pan=mono|c0=c{ch}",
              "-ar", "16000", str(out)],
-            capture_output=True, check=True,
+            capture_output=True, check=True, timeout=FFMPEG_TIMEOUT,
         )
         results.append((label, str(out)))
     return results
@@ -129,6 +134,7 @@ def load_waveform_for_diarization(path: str) -> dict[str, Any]:
             [FFMPEG, "-y", "-i", path, "-ac", "1", "-ar", str(DIARIZATION_SAMPLE_RATE), str(tmp)],
             capture_output=True,
             check=True,
+            timeout=FFMPEG_TIMEOUT,
         )
         data, sr = sf.read(str(tmp), dtype="float32", always_2d=True)
         waveform = torch.from_numpy(data.T.copy())

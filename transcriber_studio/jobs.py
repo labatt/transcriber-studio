@@ -171,7 +171,7 @@ class JobRunner:
         )
 
     def apply_diarization(
-        self, result: TranscriptResult, progress_cb=None, log_cb=None
+        self, result: TranscriptResult, progress_cb=None, log_cb=None, should_cancel=None
     ) -> TranscriptResult:
         """Label speakers on an existing transcript without re-running Whisper."""
         if not self.s.hf_token:
@@ -184,7 +184,7 @@ class JobRunner:
             raise RuntimeError(
                 "pyannote.audio is not installed. Run: pip install pyannote.audio"
             )
-        audio_path = self._ensure_audio(result.recording, progress_cb, log_cb)
+        audio_path = self._ensure_audio(result.recording, progress_cb, log_cb, should_cancel)
         if log_cb:
             log_cb("Running speaker diarization (existing transcript kept)…")
         diar = diarization.Diarizer(self.s.hf_token, self.s.device)
@@ -194,6 +194,7 @@ class JobRunner:
             self.s.max_speakers,
             progress_cb,
             log_cb,
+            should_cancel=should_cancel,
         )
         mapping = Transcriber._stable_speaker_map(turns)
         for seg in result.segments:
@@ -373,10 +374,14 @@ class JobRunner:
         enhanced file feeds diarization and the cloud engine as well, and none
         of them should be looking at a different signal than the decoder.
         """
+        source = self._source_audio(recording, progress_cb, log_cb, should_cancel)
+        # Downloading owns the first 30% of the bar; give denoising the next
+        # slice rather than leaving it looking stalled on a long recording.
         return denoise.enhance(
-            self._source_audio(recording, progress_cb, log_cb, should_cancel),
+            source,
             self.s,
             log_cb=log_cb,
+            progress_cb=(lambda f: progress_cb(0.30 + f * 0.10)) if progress_cb else None,
             should_cancel=should_cancel,
         )
 

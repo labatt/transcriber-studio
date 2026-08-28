@@ -1076,6 +1076,10 @@ class MainWindow(QMainWindow):
             self._cleanup_worker.cancel()
             self._log("Cancelling AI Cleanup…")
             return
+        if self._diar_worker and self._diar_worker.isRunning():
+            self._diar_worker.cancel()
+            self._log("Cancelling speaker detection…")
+            return
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self.cancel_btn.setEnabled(False)

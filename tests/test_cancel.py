@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from tests.support import isolated_resume_dir
 from transcriber_studio.config import Settings
@@ -138,38 +141,98 @@ def test_whisper_segment_loop_stops_on_cancel():
     assert len(decoded) <= cancel_after + 2
 
 
-def test_cancelled_download_leaves_no_partial_file_behind():
+class _FakeResponse:
+    """Enough of a requests response to stream from."""
+
+    def __init__(self, body: bytes, status_code: int = 200, chunk: int = 10):
+        self.status_code = status_code
+        self.headers = {"Content-Length": str(len(body))}
+        self._body, self._chunk = body, chunk
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size=0):
+        for i in range(0, len(self._body), self._chunk):
+            yield self._body[i:i + self._chunk]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@contextlib.contextmanager
+def _fake_download(respond):
+    """Point plaud_client at a canned server. Yields the recorded requests."""
     import transcriber_studio.plaud_client as pc
 
-    class _FakeResponse:
-        headers = {"Content-Length": "1000"}
-
-        def raise_for_status(self):
-            pass
-
-        def iter_content(self, chunk_size=0):
-            for _ in range(100):
-                yield b"x" * 10
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
+    calls: list[dict] = []
     real_get, real_url = pc.requests.get, pc.PlaudClient.audio_url
+
+    def get(url, **kwargs):
+        calls.append(kwargs.get("headers") or {})
+        return respond(len(calls))
+
+    pc.requests.get = get
+    pc.PlaudClient.audio_url = lambda self, fid, log_cb=None: "https://example.invalid/a.mp3"
     try:
-        pc.requests.get = lambda *a, **k: _FakeResponse()
-        pc.PlaudClient.audio_url = lambda self, fid, log_cb=None: "https://example.invalid/a.mp3"
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = str(Path(tmp) / "audio.mp3")
-            client = pc.PlaudClient.__new__(pc.PlaudClient)
-            try:
-                client.download_audio("abc", dest, should_cancel=lambda: True)
-                raise AssertionError("expected JobCancelled")
-            except JobCancelled:
-                pass
-            # Neither the final file nor a .part stub may survive a cancel.
-            assert list(Path(tmp).iterdir()) == []
+        yield calls
     finally:
         pc.requests.get, pc.PlaudClient.audio_url = real_get, real_url
+
+
+def test_cancelled_download_keeps_its_partial_so_the_next_run_resumes():
+    """The bytes already on disk are the whole point of resuming.
+
+    Deleting them made every interruption — a closed lid, a dropped link —
+    start an hour-long download again from nothing.
+    """
+    import transcriber_studio.plaud_client as pc
+
+    stop_after = [0]
+
+    def should_cancel():
+        stop_after[0] += 1
+        return stop_after[0] > 2
+
+    with _fake_download(lambda n: _FakeResponse(b"x" * 1000)):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "audio.mp3"
+            client = pc.PlaudClient.__new__(pc.PlaudClient)
+            with pytest.raises(JobCancelled):
+                client.download_audio("abc", str(dest), should_cancel=should_cancel)
+            assert not dest.exists(), "an interrupted download is not a finished one"
+            partial = Path(f"{dest}.part")
+            assert partial.exists() and partial.stat().st_size == 20
+
+
+def test_download_resumes_from_where_it_stopped():
+    import transcriber_studio.plaud_client as pc
+
+    with _fake_download(lambda n: _FakeResponse(b"tail", status_code=206)) as calls:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "audio.mp3"
+            Path(f"{dest}.part").write_bytes(b"head")
+            client = pc.PlaudClient.__new__(pc.PlaudClient)
+            client.download_audio("abc", str(dest))
+            assert calls[0].get("Range") == "bytes=4-"
+            assert dest.read_bytes() == b"headtail"
+
+
+def test_download_starts_over_when_the_server_will_not_resume():
+    """A 200 to a ranged request means the body starts from byte zero.
+
+    Appending it to what we had would corrupt the file silently, which is worse
+    than the wasted bandwidth of downloading it again.
+    """
+    import transcriber_studio.plaud_client as pc
+
+    with _fake_download(lambda n: _FakeResponse(b"whole file", status_code=200)):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "audio.mp3"
+            Path(f"{dest}.part").write_bytes(b"stale")
+            client = pc.PlaudClient.__new__(pc.PlaudClient)
+            client.download_audio("abc", str(dest))
+            assert dest.read_bytes() == b"whole file"
