@@ -158,6 +158,7 @@ class JobRunner:
         progress_cb=None,
         log_cb=None,
         should_cancel: ShouldCancel = None,
+        resume=None,
     ) -> TranscriptResult:
         """Produce a transcript result without writing files (for the rename step)."""
         audio_path = self._ensure_audio(recording, progress_cb, log_cb, should_cancel)
@@ -168,6 +169,7 @@ class JobRunner:
             progress_cb,
             log_cb,
             should_cancel=should_cancel,
+            resume=resume,
         )
 
     def apply_diarization(
@@ -354,7 +356,7 @@ class JobRunner:
                     log_cb(f"Saved transcript unusable ({e}) — transcribing again.")
 
         transcript = self.transcribe_only(
-            recording, index, progress_cb, log_cb, should_cancel
+            recording, index, progress_cb, log_cb, should_cancel, resume
         )
         resume.record(
             key,

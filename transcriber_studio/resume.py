@@ -31,6 +31,8 @@ RESUME_DIR = APP_DIR / "resume"
 MAX_AGE_DAYS = 30
 
 TRANSCRIPT_STAGE = "transcript"
+#: The bare Whisper decode, banked before speakers are assigned to it.
+DECODE_STAGE = "decode"
 
 
 def send_key(*parts: str) -> str:
@@ -222,6 +224,46 @@ def transcript_key(recording: Recording, opts: Any) -> str:
     )
 
 
+def decode_key(recording: Recording, opts: Any) -> str:
+    """Identifies a Whisper decode by everything that changes the words.
+
+    Deliberately excludes the diarization settings that transcript_key
+    includes: speaker labels are attached to the segments afterwards, so a
+    decode stays valid however diarization is configured — or whether it ran
+    at all. That is the whole point of saving it separately. Diarizing an hour
+    of audio can take minutes, and a crash in the middle of it used to throw
+    away the far more expensive decode that came before.
+    """
+    return send_key(
+        "decode",
+        recording.id,
+        str(getattr(opts, "engine", "local")),
+        str(opts.model),
+        str(opts.language),
+        str(opts.channel_mode),
+        ",".join(opts.channel_names or []),
+        str(getattr(opts, "denoise", "")),
+        str(getattr(opts, "vad_enabled", True)),
+        repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
+        str(getattr(opts, "hotwords", "")),
+        str(getattr(opts, "hallucination_guard", False)),
+    )
+
+
+def decode_to_dict(segments: list[Segment], language: str) -> dict[str, Any]:
+    return {
+        "language": language,
+        "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in segments],
+    }
+
+
+def decode_from_dict(data: dict[str, Any]) -> tuple[list[Segment], str]:
+    return (
+        [Segment(**s) for s in data.get("segments", [])],
+        data.get("language", ""),
+    )
+
+
 def transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
     return {
         "language": transcript.language,
@@ -272,7 +314,7 @@ def saved_progress(recording: Recording) -> dict[str, int]:
     log = ResumeLog(path).load()
     counts = {
         stage: log.count(stage)
-        for stage in (TRANSCRIPT_STAGE, "glossary", "cleanup")
+        for stage in (TRANSCRIPT_STAGE, DECODE_STAGE, "glossary", "cleanup")
     }
     counts = {stage: n for stage, n in counts.items() if n}
     _progress_cache[str(path)] = (stamp, counts)
@@ -287,6 +329,10 @@ def describe_progress(recording: Recording) -> str:
     parts = []
     if counts.get(TRANSCRIPT_STAGE):
         parts.append("transcript")
+    elif counts.get(DECODE_STAGE):
+        # Only worth mentioning on its own: with a full transcript saved, the
+        # decode behind it is implied and saying both would just be noise.
+        parts.append("transcribed audio (speakers still to do)")
     if counts.get("glossary"):
         parts.append(f"{counts['glossary']} glossary chunk(s)")
     if counts.get("cleanup"):

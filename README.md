@@ -85,8 +85,9 @@ there is no configuration that quietly does nothing.
 - **Resume** — an interrupted job restarts from its last saved step. No re-transcription, no
   repeated model calls, no repeated spend. This covers the whole pipeline: a download continues
   from the byte it stopped at, finished denoise chunks and detected speaker turns are reused, and
-  every stage can be cancelled while it runs. Closing the lid mid-job costs you the current chunk,
-  not the job.
+  every stage can be cancelled while it runs. The transcription is banked before speaker detection
+  begins, so a failure there costs you the labels, not the words. Closing the lid mid-job costs you
+  the current chunk, not the job.
 - **Components window** — what's installed, what's newer, and buttons to update it.
 - **Output formats** — `txt`, `srt`, `vtt`, `json`, `md`, with a filename template builder.
 

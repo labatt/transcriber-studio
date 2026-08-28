@@ -47,7 +47,7 @@ class _FakeTranscriber:
         self.cancel_during = cancel_during
 
     def transcribe(self, recording, audio_path, opts, progress_cb=None, log_cb=None,
-                   should_cancel=None):
+                   should_cancel=None, resume=None):
         self.calls += 1
         if self.cancel_during:
             raise JobCancelled("Cancelled — stopping transcription.")
@@ -92,7 +92,7 @@ def test_cancel_between_transcription_and_export_writes_nothing():
         fake = _FakeTranscriber()
 
         def transcribe(recording, audio_path, opts, progress_cb=None, log_cb=None,
-                       should_cancel=None):
+                       should_cancel=None, resume=None):
             fake.calls += 1
             flag["cancelled"] = True          # user hits Cancel right about now
             return _transcript(recording)

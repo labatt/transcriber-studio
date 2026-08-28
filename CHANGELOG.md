@@ -31,6 +31,11 @@ versions follow [Semantic Versioning](https://semver.org/).
   restarting an interrupted job resumes instead of starting over. Speaker turns are cached the same
   way. Downloads keep their partial file and resume with an HTTP range request rather than
   re-fetching an hour-long recording from the beginning.
+- **A crash during speaker detection no longer costs you the transcription.** The Whisper pass is
+  checkpointed before diarization starts rather than after it finishes, so the minutes of GPU time
+  that produced the words survive a failure in the stage that only labels them. Resume offers
+  "transcribed audio (speakers still to do)" and picks up from there. The checkpoint deliberately
+  ignores the diarization settings, since speaker labels are attached to the segments afterwards.
 - **Speaker detection can be cancelled.** pyannote runs as one long call; the app now interrupts it
   through the progress hook, and the Cancel button is wired to it. A cancel is also no longer
   swallowed by the handler that skips past a failed diarization.

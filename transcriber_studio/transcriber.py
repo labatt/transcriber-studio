@@ -8,6 +8,7 @@ Heavy deps (faster-whisper / ctranslate2) are imported lazily.
 from __future__ import annotations
 
 import importlib.util
+import json
 from dataclasses import dataclass
 
 from . import (
@@ -18,6 +19,7 @@ from . import (
     vocab_bias,
     whisper_models,
 )
+from . import resume as resume_store
 from .hardware import cuda_available
 from .job_cancel import JobCancelled, ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
@@ -182,6 +184,7 @@ class Transcriber:
         progress_cb=None,
         log_cb=None,
         should_cancel: ShouldCancel = None,
+        resume=None,
     ) -> TranscriptResult:
         def log(msg):
             if log_cb:
@@ -207,7 +210,7 @@ class Transcriber:
                 )
             return self._transcribe_single(
                 recording, audio_path, model, language, opts, progress_cb, log,
-                should_cancel,
+                should_cancel, resume,
             )
         except JobCancelled:
             raise  # never mistake a cancel for a CUDA fault worth retrying on CPU
@@ -223,7 +226,7 @@ class Transcriber:
                 )
             return self._transcribe_single(
                 recording, audio_path, cpu_model, language, opts, progress_cb, log,
-                should_cancel,
+                should_cancel, resume,
             )
 
     # ---- cloud engines -------------------------------------------------
@@ -300,16 +303,32 @@ class Transcriber:
 
     def _transcribe_single(
         self, recording, audio_path, model, language, opts, progress_cb, log,
-        should_cancel: ShouldCancel = None,
+        should_cancel: ShouldCancel = None, resume=None,
     ):
-        total_dur = recording.duration_seconds or audio_utils.probe(audio_path)["duration"]
-        log("Transcribing audio…")
-        segments, detected_lang = self._run_whisper(
-            model, audio_path, language, opts, log, progress_cb, total_dur, should_cancel
+        # A disabled log rather than an `if resume:` around every use of it.
+        bank = resume if resume is not None else resume_store.ResumeLog(None)
+        decode_key = resume_store.decode_key(recording, opts)
+
+        segments, detected_lang = self._decode_or_restore(
+            bank, decode_key, recording, audio_path, model, language, opts,
+            progress_cb, log, should_cancel,
         )
 
         speakers_order: list[str] = []
         if opts.diarization_enabled and diarization.is_available():
+            # Bank the decode before starting diarization, not after — and
+            # before the cancel check, since re-running Whisper costs GPU time
+            # whether the run ended by crash or by choice. Diarizing an hour of
+            # audio is minutes of work, and dying inside it used to discard the
+            # far more expensive decode along with it.
+            bank.record(
+                decode_key,
+                json.dumps(
+                    resume_store.decode_to_dict(segments, detected_lang), ensure_ascii=False
+                ),
+                stage=resume_store.DECODE_STAGE,
+                segments=len(segments),
+            )
             check_cancel(should_cancel, log, message="Cancelled — skipping diarization.")
             log("Running speaker diarization…")
             try:
@@ -344,6 +363,31 @@ class Transcriber:
             recording=recording, segments=segments,
             language=detected_lang or (language or ""),
             model=opts.model, speakers=speakers_order,
+        )
+
+    def _decode_or_restore(
+        self, bank, key, recording, audio_path, model, language, opts,
+        progress_cb, log, should_cancel,
+    ):
+        """The Whisper pass, reused from an interrupted run where possible."""
+        saved = bank.get(key)
+        if saved:
+            try:
+                segments, detected_lang = resume_store.decode_from_dict(json.loads(saved))
+                log(
+                    f"Restored {len(segments)} transcribed segment(s) from an interrupted "
+                    f"run — going straight to speaker detection."
+                )
+                if progress_cb:
+                    progress_cb(0.95)
+                return segments, detected_lang
+            except Exception as e:
+                log(f"Saved transcription unusable ({e}) — transcribing again.")
+
+        total_dur = recording.duration_seconds or audio_utils.probe(audio_path)["duration"]
+        log("Transcribing audio…")
+        return self._run_whisper(
+            model, audio_path, language, opts, log, progress_cb, total_dur, should_cancel
         )
 
     def _transcribe_per_channel(

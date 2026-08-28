@@ -22,7 +22,7 @@ from .glossary import (
 )
 from .job_cancel import JobCancelled, ShouldCancel, check_cancel, sleep_cancellable
 from .models import Segment, TranscriptResult
-from .resume import TRANSCRIPT_STAGE, ResumeLog, log_for, send_key
+from .resume import DECODE_STAGE, TRANSCRIPT_STAGE, ResumeLog, log_for, send_key
 
 SYSTEM_PROMPT = """You clean up raw speech-to-text transcripts produced by a Whisper-style segmenter, where each input segment is usually one short phrase or clause tagged with a speaker label and a start time.
 
@@ -260,7 +260,7 @@ def cleanup_transcript(
         # Stopping on purpose means starting over next time, so the saved
         # sends go. The transcript stays — re-running Whisper costs time for
         # an identical result.
-        dropped = resume.discard(keep_stages=(TRANSCRIPT_STAGE,))
+        dropped = resume.discard(keep_stages=(TRANSCRIPT_STAGE, DECODE_STAGE))
         if log_cb and dropped:
             log_cb(f"AI Cleanup: cancelled — discarded {dropped} saved send(s).")
         raise
@@ -269,7 +269,7 @@ def cleanup_transcript(
     result.speakers = list(dict.fromkeys(s.speaker for s in updated if s.speaker))
     # Every send is now reflected in the result; the transcript entry stays so
     # a failure while exporting still can't cost a re-transcription.
-    resume.discard(keep_stages=(TRANSCRIPT_STAGE,))
+    resume.discard(keep_stages=(TRANSCRIPT_STAGE, DECODE_STAGE))
     if log_cb:
         log_cb(
             f"AI Cleanup: finished — {len(updated)} sentence(s), "
