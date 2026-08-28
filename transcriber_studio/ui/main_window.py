@@ -234,6 +234,9 @@ class MainWindow(QMainWindow):
 
         # right: options (scrollable)
         self.options = OptionsPanel(self.settings)
+        # The panel offers an "Advanced settings…" button; it does not own the
+        # dialog, so it asks for it.
+        self.options.open_settings.connect(self._open_settings)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

@@ -71,6 +71,14 @@ versions follow [Semantic Versioning](https://semver.org/).
   pyannote plays no part on this path. A join where only one person speaks can only match that one,
   and the log says how many voices it could not place rather than implying they were matched.
 
+- **The Options column now holds only what you choose per job**, and the Settings dialog is tabbed.
+  The column had seven group boxes and around forty-five controls in a scrolling strip, mixing
+  per-run choices with tuning set once and forgotten. It now carries the engine, the three pipeline
+  switches, speaker labels, formats, output folder and AI cleanup — with an "Advanced settings…"
+  button for the rest. VAD tuning, vocabulary terms, channels, line formatting, file naming and
+  glossary tuning moved into Settings, which gained tabs (Engines, Audio, Speakers, Output,
+  AI Cleanup, Plaud) rather than becoming the new long scroll.
+
 ### Changed
 
 - The manual install instructions cover Windows, macOS and Linux rather than assuming `winget`.

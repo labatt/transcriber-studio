@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -16,9 +17,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -97,12 +100,17 @@ class SettingsDialog(SheetDialog):
         self.setMinimumHeight(520)
 
         outer = QVBoxLayout(self)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        # The notes wrap; nothing here should ever scroll sideways.
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        layout = QVBoxLayout(body)
+        self.tabs = QTabWidget()
+        outer.addWidget(self.tabs)
+
+        # One scrolling page per tab. Everything used to be a single column of
+        # nine group boxes, which meant hunting for a checkbox by scrolling.
+        engines = self._tab("Engines")
+        audio = self._tab("Audio")
+        speakers = self._tab("Speakers")
+        output = self._tab("Output")
+        ai_tab = self._tab("AI Cleanup")
+        plaud_tab = self._tab("Plaud")
 
         # --- ElevenLabs Scribe ---
         # The engine itself is picked per run in the Options panel; what lives
@@ -139,7 +147,7 @@ class SettingsDialog(SheetDialog):
         el_note.setWordWrap(True)
         el_note.setStyleSheet("color: gray;")
         elf.addRow(el_note)
-        layout.addWidget(el)
+        engines.addWidget(el)
 
         # --- Gemini transcription ---
         # The key lives in the AI providers group below: it is the same Google
@@ -182,7 +190,7 @@ class SettingsDialog(SheetDialog):
         )
         gem_note.setStyleSheet("color: gray;")
         gemf.addRow(gem_note)
-        layout.addWidget(gem)
+        engines.addWidget(gem)
 
         # --- Whisper engine ---
         eng = QGroupBox("Whisper engine (local — faster-whisper)")
@@ -238,7 +246,7 @@ class SettingsDialog(SheetDialog):
         # Wrapped, and spanning the row: the CUDA install command in this text
         # is one long line, and a plain label would set the dialog's width by it.
         f.addRow(WrappedNote(gpu))
-        layout.addWidget(eng)
+        engines.addWidget(eng)
 
         # --- Diarization ---
         diar = QGroupBox("Speaker diarization (pyannote.audio)")
@@ -272,7 +280,7 @@ class SettingsDialog(SheetDialog):
         )
         lbl.setStyleSheet("color: gray;")
         df.addRow(lbl)
-        layout.addWidget(diar)
+        speakers.addWidget(diar)
 
         # --- Audio front-end ---
         # Where the denoiser lives on this machine. Whether it runs at all is a
@@ -332,7 +340,7 @@ class SettingsDialog(SheetDialog):
         self.denoise_status.setWordWrap(True)
         self.denoise_status.setStyleSheet("color: gray;")
         dnf.addRow(self.denoise_status)
-        layout.addWidget(dn)
+        audio.addWidget(dn)
 
         # --- Plaud cloud ---
         plaud = QGroupBox("Plaud cloud")
@@ -350,7 +358,7 @@ class SettingsDialog(SheetDialog):
         plaud_note.setWordWrap(True)
         plaud_note.setStyleSheet("color: gray;")
         pf.addRow(plaud_note)
-        layout.addWidget(plaud)
+        plaud_tab.addWidget(plaud)
 
         # --- AI provider keys ---
         ai = QGroupBox("AI providers (for AI Cleanup — keys stored locally only)")
@@ -377,7 +385,7 @@ class SettingsDialog(SheetDialog):
         ai_note.setWordWrap(True)
         ai_note.setStyleSheet("color: gray;")
         af.addRow(ai_note)
-        layout.addWidget(ai)
+        ai_tab.addWidget(ai)
 
         # --- AI cleanup defaults ---
         # The provider keys above say what the app *can* use; this says what it
@@ -415,10 +423,190 @@ class SettingsDialog(SheetDialog):
         self.default_model_status.setWordWrap(True)
         self.default_model_status.setStyleSheet("color: gray;")
         dfl.addRow(self.default_model_status)
-        layout.addWidget(dflt)
+        ai_tab.addWidget(dflt)
 
-        scroll.setWidget(body)
-        outer.addWidget(scroll)
+        # --- VAD, biasing, guard: the tuning that used to crowd the Options
+        # column. Per-run on/off switches stay there; the numbers live here.
+        vad = QGroupBox("Voice activity detection (tuning)")
+        vf = QFormLayout(vad)
+        self.vad_threshold = QDoubleSpinBox()
+        self.vad_threshold.setRange(0.05, 0.95)
+        self.vad_threshold.setSingleStep(0.05)
+        self.vad_threshold.setValue(settings.vad_threshold)
+        self.vad_threshold.setToolTip(
+            "How loud a sound must be to count as speech. Raise it if breathing "
+            "and keyboard noise are being transcribed; lower it if quiet talking "
+            "goes missing."
+        )
+        vf.addRow("Speech threshold:", self.vad_threshold)
+        self.vad_min_silence = QSpinBox()
+        self.vad_min_silence.setRange(0, 10000)
+        self.vad_min_silence.setSingleStep(50)
+        self.vad_min_silence.setValue(settings.vad_min_silence_ms)
+        vf.addRow("Minimum silence (ms):", self.vad_min_silence)
+        self.vad_pad = QSpinBox()
+        self.vad_pad.setRange(0, 2000)
+        self.vad_pad.setSingleStep(50)
+        self.vad_pad.setValue(settings.vad_speech_pad_ms)
+        self.vad_pad.setToolTip("Kept either side of speech, so words are not clipped.")
+        vf.addRow("Speech padding (ms):", self.vad_pad)
+        self.vad_min_speech = QSpinBox()
+        self.vad_min_speech.setRange(0, 5000)
+        self.vad_min_speech.setSingleStep(50)
+        self.vad_min_speech.setValue(settings.vad_min_speech_ms)
+        vf.addRow("Minimum speech (ms):", self.vad_min_speech)
+        self.vad_max_speech = QDoubleSpinBox()
+        # Zero means no cap, so it has to be reachable — a minimum of 1.0 would
+        # quietly turn "never split" into "split every second".
+        self.vad_max_speech.setRange(0.0, 3600.0)
+        self.vad_max_speech.setSingleStep(5.0)
+        self.vad_max_speech.setSpecialValueText("no cap")
+        self.vad_max_speech.setValue(settings.vad_max_speech_s)
+        vf.addRow("Maximum speech (s):", self.vad_max_speech)
+        audio.addWidget(vad)
+
+        bias = QGroupBox("Vocabulary biasing")
+        bf = QFormLayout(bias)
+        self.bias_terms = QPlainTextEdit(settings.bias_extra_terms)
+        self.bias_terms.setPlaceholderText("Names, products, jargon — one per line or comma separated")
+        self.bias_terms.setMaximumHeight(90)
+        self.bias_terms.setToolTip(
+            "Fed to the decoder as hotwords, on top of anything the glossary "
+            "already knows. Not available on the Gemini engine."
+        )
+        bf.addRow("Extra vocabulary:", self.bias_terms)
+        self.bias_budget = QSpinBox()
+        self.bias_budget.setRange(0, 4000)
+        self.bias_budget.setSingleStep(50)
+        self.bias_budget.setValue(settings.bias_max_chars)
+        self.bias_budget.setToolTip(
+            "Characters of vocabulary sent to the decoder. Too many and the "
+            "model starts hearing them everywhere."
+        )
+        bf.addRow("Vocabulary budget:", self.bias_budget)
+        self.hallucination_guard = QCheckBox(
+            "Hallucination guard — do not carry context between windows"
+        )
+        self.hallucination_guard.setChecked(settings.hallucination_guard)
+        self.hallucination_guard.setToolTip(
+            "Stops one invented passage seeding the next. Worth having on noisy "
+            "audio; costs a little continuity on clean audio."
+        )
+        bf.addRow(self.hallucination_guard)
+        audio.addWidget(bias)
+        audio.addStretch()
+
+        # --- channels belong with speakers, not with output formatting ---
+        chan = QGroupBox("Channels")
+        cf = QFormLayout(chan)
+        self.channel_mode = QComboBox()
+        for label, data in (("Downmix to mono", "downmix"),
+                            ("Transcribe each channel separately", "per_channel")):
+            self.channel_mode.addItem(label, data)
+        index = self.channel_mode.findData(settings.channel_mode)
+        self.channel_mode.setCurrentIndex(index if index >= 0 else 0)
+        self.channel_mode.setToolTip(
+            "Per-channel suits a recorder that gave each speaker their own track; "
+            "speakers then come from the channels and diarization is not needed."
+        )
+        cf.addRow("Channels:", self.channel_mode)
+        self.channel_names = QLineEdit(settings.channel_names)
+        self.channel_names.setPlaceholderText("e.g. Interviewer, Guest")
+        cf.addRow("Channel names:", self.channel_names)
+        speakers.addWidget(chan)
+        speakers.addStretch()
+
+        # --- everything about how the file reads and what it is called ---
+        lines = QGroupBox("Line formatting")
+        lf = QFormLayout(lines)
+        self.line_mode = QComboBox()
+        # "segment" is the stored value for one-line-per-turn; the formatter
+        # knows these three strings and nothing else.
+        for label, data in (("One line per speaker turn", "segment"),
+                            ("One line per sentence", "sentence"),
+                            ("Wrap at N characters", "wrap")):
+            self.line_mode.addItem(label, data)
+        index = self.line_mode.findData(settings.line_mode)
+        self.line_mode.setCurrentIndex(index if index >= 0 else 0)
+        lf.addRow("Split into lines:", self.line_mode)
+        self.wrap_chars = QSpinBox()
+        self.wrap_chars.setRange(20, 300)
+        self.wrap_chars.setValue(settings.wrap_chars)
+        lf.addRow("Wrap width:", self.wrap_chars)
+        self.include_ts = QCheckBox("Include timestamps in text output")
+        self.include_ts.setChecked(settings.include_timestamps)
+        lf.addRow(self.include_ts)
+        self.newline = QComboBox()
+        for label, data in (("Windows (CRLF)", "crlf"), ("Unix (LF)", "lf")):
+            self.newline.addItem(label, data)
+        index = self.newline.findData(settings.newline)
+        self.newline.setCurrentIndex(index if index >= 0 else 0)
+        lf.addRow("Line endings:", self.newline)
+        output.addWidget(lines)
+
+        names = QGroupBox("File names")
+        nf = QFormLayout(names)
+        self.template = QLineEdit(settings.filename_template)
+        tmpl_row = QHBoxLayout()
+        tmpl_row.setContentsMargins(0, 0, 0, 0)
+        tmpl_row.addWidget(self.template, stretch=1)
+        builder = QPushButton("Build…")
+        builder.setAutoDefault(False)
+        builder.clicked.connect(self._open_builder)
+        tmpl_row.addWidget(builder)
+        nf.addRow("Filename template:", self._wrap(tmpl_row))
+        self.preview = QLabel("")
+        self.preview.setStyleSheet("color: gray;")
+        nf.addRow("Example:", self.preview)
+        self.overwrite = QCheckBox("Overwrite files that already exist")
+        self.overwrite.setChecked(settings.overwrite)
+        nf.addRow(self.overwrite)
+        self.sanitize = QCheckBox("Replace characters Windows will not accept")
+        self.sanitize.setChecked(settings.sanitize_names)
+        nf.addRow(self.sanitize)
+        self.owner_names = QLineEdit(settings.owner_names)
+        self.owner_names.setPlaceholderText("e.g. Chris, Chris L.")
+        self.owner_names.setToolTip(
+            "Used to leave your own name out of {name}, so a file is named after "
+            "the other person in the conversation."
+        )
+        nf.addRow("Your name(s):", self.owner_names)
+        output.addWidget(names)
+        output.addStretch()
+        self.template.textChanged.connect(self._update_preview)
+        self.sanitize.toggled.connect(self._update_preview)
+
+        # --- glossary tuning; which glossary a job uses stays in Options ---
+        gloss = QGroupBox("Glossary extraction (tuning)")
+        gf = QFormLayout(gloss)
+        self.glossary_model = QLineEdit(settings.glossary_model)
+        self.glossary_model.setPlaceholderText("blank = same model as cleanup")
+        gf.addRow("Glossary model:", self.glossary_model)
+        self.glossary_temperature = QDoubleSpinBox()
+        self.glossary_temperature.setRange(0.0, 2.0)
+        self.glossary_temperature.setSingleStep(0.1)
+        self.glossary_temperature.setValue(settings.glossary_temperature)
+        gf.addRow("Glossary temperature:", self.glossary_temperature)
+        self.glossary_chunk_threshold = QSpinBox()
+        self.glossary_chunk_threshold.setRange(1000, 500000)
+        self.glossary_chunk_threshold.setSingleStep(1000)
+        self.glossary_chunk_threshold.setValue(settings.glossary_chunk_token_threshold)
+        self.glossary_chunk_threshold.setToolTip(
+            "Transcripts longer than this are extracted in chunks."
+        )
+        gf.addRow("Chunk threshold (tokens):", self.glossary_chunk_threshold)
+        self.force_reextract = QCheckBox("Always re-extract, ignoring a saved glossary")
+        self.force_reextract.setChecked(settings.force_reextract)
+        gf.addRow(self.force_reextract)
+        self.prompt_cache_on = QCheckBox("Use prompt caching where the provider supports it")
+        self.prompt_cache_on.setChecked(settings.prompt_cache_enabled)
+        self.prompt_cache_on.setToolTip("Cheaper repeat runs; no effect on the result.")
+        gf.addRow(self.prompt_cache_on)
+        ai_tab.addWidget(gloss)
+        ai_tab.addStretch()
+
+        engines.addStretch()
+        plaud_tab.addStretch()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -435,6 +623,34 @@ class SettingsDialog(SheetDialog):
         outer.addWidget(buttons)
         self._update_model_note()
         self._update_denoise_status()
+        self._update_preview()
+
+    def _tab(self, title: str) -> QVBoxLayout:
+        """A scrolling page in the dialog. Returns the layout to fill."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        # The notes wrap; nothing here should ever scroll sideways.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
+        return layout
+
+    def _open_builder(self):
+        from .options_panel import TemplateDialog
+
+        dlg = TemplateDialog(self.template.text(), self.sanitize.isChecked(), self)
+        if dlg.exec():
+            self.template.setText(dlg.template())
+
+    def _update_preview(self):
+        from .. import filename_builder
+
+        stem = filename_builder.render(
+            self.template.text(), filename_builder.sample_values(), self.sanitize.isChecked()
+        )
+        self.preview.setText(f"{stem}.txt")
 
     def _reset_default_model_items(self):
         """Show the saved default even before any model list is fetched."""
@@ -648,6 +864,29 @@ class SettingsDialog(SheetDialog):
         self.s.min_speakers = self.minspk.value()
         self.s.max_speakers = self.maxspk.value()
         self.s.plaud_page_size = self.plaud_page_size.value()
+        self.s.vad_threshold = self.vad_threshold.value()
+        self.s.vad_min_silence_ms = self.vad_min_silence.value()
+        self.s.vad_speech_pad_ms = self.vad_pad.value()
+        self.s.vad_min_speech_ms = self.vad_min_speech.value()
+        self.s.vad_max_speech_s = self.vad_max_speech.value()
+        self.s.bias_extra_terms = self.bias_terms.toPlainText().strip()
+        self.s.bias_max_chars = self.bias_budget.value()
+        self.s.hallucination_guard = self.hallucination_guard.isChecked()
+        self.s.channel_mode = self.channel_mode.currentData() or "downmix"
+        self.s.channel_names = self.channel_names.text().strip()
+        self.s.line_mode = self.line_mode.currentData() or "segment"
+        self.s.wrap_chars = self.wrap_chars.value()
+        self.s.include_timestamps = self.include_ts.isChecked()
+        self.s.newline = self.newline.currentData() or "crlf"
+        self.s.filename_template = self.template.text().strip() or "{date}_{name}"
+        self.s.overwrite = self.overwrite.isChecked()
+        self.s.sanitize_names = self.sanitize.isChecked()
+        self.s.owner_names = self.owner_names.text().strip()
+        self.s.glossary_model = self.glossary_model.text().strip()
+        self.s.glossary_temperature = self.glossary_temperature.value()
+        self.s.glossary_chunk_token_threshold = self.glossary_chunk_threshold.value()
+        self.s.force_reextract = self.force_reextract.isChecked()
+        self.s.prompt_cache_enabled = self.prompt_cache_on.isChecked()
         self.s.deep_filter_path = self.deep_filter_path.text().strip()
         self.s.denoise_model_path = self.denoise_model_path.text().strip()
         self.s.denoise_postfilter = self.denoise_postfilter.isChecked()
