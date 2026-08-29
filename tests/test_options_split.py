@@ -119,3 +119,50 @@ def test_opening_and_saving_settings_changes_nothing_by_itself():
         if getattr(defaults, name) != getattr(settings, name)
     }
     assert not changed, f"opening Settings and saving altered: {changed}"
+
+
+def test_each_section_links_to_the_settings_tab_that_holds_its_rest():
+    """A general "Advanced settings…" leaves you hunting once you arrive."""
+    panel = OptionsPanel(Settings())
+    asked: list[str] = []
+    panel.open_settings.connect(asked.append)
+
+    from PySide6.QtWidgets import QLabel
+
+    links = [
+        label for label in panel.findChildren(QLabel)
+        if 'href="' in label.text()
+    ]
+    assert len(links) >= 5, [label.text() for label in links]
+
+    for label in links:
+        tab = label.text().split('href="', 1)[1].split('"', 1)[0]
+        label.linkActivated.emit(tab)
+
+    assert set(asked) == {"Engines", "Audio", "Speakers", "Output", "AI Cleanup"}
+
+
+def test_every_link_names_a_tab_that_actually_exists():
+    """A typo here is a link that silently opens on the wrong page."""
+    from PySide6.QtWidgets import QLabel
+
+    panel = OptionsPanel(Settings())
+    dialog = SettingsDialog(Settings())
+    tabs = {dialog.tabs.tabText(i) for i in range(dialog.tabs.count())}
+
+    for label in panel.findChildren(QLabel):
+        if 'href="' not in label.text():
+            continue
+        tab = label.text().split('href="', 1)[1].split('"', 1)[0]
+        assert tab in tabs, f"{tab!r} is not a Settings tab; have {sorted(tabs)}"
+
+
+def test_the_dialog_opens_on_the_tab_it_was_asked_for():
+    dialog = SettingsDialog(Settings(), tab="Output")
+    assert dialog.tabs.tabText(dialog.tabs.currentIndex()) == "Output"
+
+
+def test_an_unknown_tab_name_is_ignored_rather_than_fatal():
+    dialog = SettingsDialog(Settings(), tab="Nonexistent")
+    assert dialog.select_tab("Nonexistent") is False
+    assert dialog.tabs.currentIndex() == 0

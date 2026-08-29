@@ -203,7 +203,7 @@ class MainWindow(QMainWindow):
         self.logout_btn.clicked.connect(self._logout)
         self.setup_btn.clicked.connect(self._run_setup_wizard)
         self.glossaries_btn.clicked.connect(self._open_glossaries)
-        self.settings_btn.clicked.connect(self._open_settings)
+        self.settings_btn.clicked.connect(lambda: self._open_settings())
 
         wrapper = QWidget()
         wrap_layout = QVBoxLayout(wrapper)
@@ -474,8 +474,8 @@ class MainWindow(QMainWindow):
         # The panel's chooser lists names and sizes, so it has to be re-read.
         self.options.refresh_glossaries()
 
-    def _open_settings(self):
-        dlg = SettingsDialog(self.settings, self)
+    def _open_settings(self, tab: str = ""):
+        dlg = SettingsDialog(self.settings, self, tab=tab)
         if dlg.exec():
             config.save(self.settings)
             self._log("Settings saved.")

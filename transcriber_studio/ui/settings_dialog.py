@@ -88,9 +88,10 @@ class _ModelListWorker(QThread):
 
 
 class SettingsDialog(SheetDialog):
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, parent=None, tab: str = ""):
         super().__init__(parent)
         self.s = settings
+        self._open_on_tab = tab
         self._test_worker: _ProviderTestWorker | None = None
         self._el_worker: _ElevenLabsTestWorker | None = None
         self._model_worker: _ModelListWorker | None = None
@@ -624,6 +625,17 @@ class SettingsDialog(SheetDialog):
         self._update_model_note()
         self._update_denoise_status()
         self._update_preview()
+        self.select_tab(tab)
+
+    def select_tab(self, title: str) -> bool:
+        """Open on a named tab. Unknown or empty names leave it on the first."""
+        if not title:
+            return False
+        for index in range(self.tabs.count()):
+            if self.tabs.tabText(index) == title:
+                self.tabs.setCurrentIndex(index)
+                return True
+        return False
 
     def _tab(self, title: str) -> QVBoxLayout:
         """A scrolling page in the dialog. Returns the layout to fill."""

@@ -53,8 +53,9 @@ def _narrow_combo(combo: QComboBox, min_chars: int = 12) -> QComboBox:
 
 
 class OptionsPanel(QWidget):
-    #: Asks the main window to open Settings; the panel does not own that dialog.
-    open_settings = Signal()
+    #: Asks the main window to open Settings on a named tab ("" for wherever it
+    #: was). The panel does not own that dialog, so it asks rather than opens.
+    open_settings = Signal(str)
 
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
@@ -94,6 +95,7 @@ class OptionsPanel(QWidget):
         self.engine_status.setWordWrap(True)
         self.engine_status.setStyleSheet(muted_small())
         ef.addRow(self.engine_status)
+        ef.addRow(self._settings_link("Models, keys and devices…", "Engines"))
         root.addWidget(eng_box)
 
         # ---- Audio pipeline ----
@@ -135,6 +137,8 @@ class OptionsPanel(QWidget):
         self.pipeline_status.setWordWrap(True)
         self.pipeline_status.setStyleSheet("color: gray;")
         pf.addRow(self.pipeline_status)
+        pf.addRow(self._settings_link(
+            "Denoising, VAD tuning and vocabulary…", "Audio"))
         root.addWidget(pipe_box)
 
         # ---- Speakers ----
@@ -144,6 +148,8 @@ class OptionsPanel(QWidget):
         self.include_speakers = QCheckBox("Label who is speaking")
         self.include_speakers.setChecked(settings.include_speakers)
         sf.addRow(self.include_speakers)
+        sf.addRow(self._settings_link(
+            "Speaker detection and channels…", "Speakers"))
         root.addWidget(spk_box)
 
         out_box = QGroupBox("Output")
@@ -170,6 +176,8 @@ class OptionsPanel(QWidget):
         browse.clicked.connect(self._browse)
         dir_row.addWidget(browse)
         of.addRow("Folder:", self._wrap(dir_row))
+        of.addRow(self._settings_link(
+            "Line formatting and file names…", "Output"))
         root.addWidget(out_box)
 
         ai_box = QGroupBox("AI Cleanup")
@@ -211,6 +219,8 @@ class OptionsPanel(QWidget):
         self.ai_status.setWordWrap(True)
         self.ai_status.setStyleSheet("color: gray;")
         af.addRow(self.ai_status)
+        af.addRow(self._settings_link(
+            "Provider keys and glossary tuning…", "AI Cleanup"))
         root.addWidget(ai_box)
 
         # Everything else about cleanup — glossary model, temperature, chunking,
@@ -221,7 +231,7 @@ class OptionsPanel(QWidget):
             "VAD tuning, vocabulary terms, line formatting, file names and "
             "glossary tuning — the things you set once rather than per job."
         )
-        advanced.clicked.connect(self.open_settings.emit)
+        advanced.clicked.connect(lambda: self.open_settings.emit(""))
         root.addWidget(advanced)
 
         root.addStretch()
@@ -232,6 +242,19 @@ class OptionsPanel(QWidget):
         self._update_engine_status()
 
     # ------------------------------------------------------------------
+    def _settings_link(self, text: str, tab: str) -> QLabel:
+        """A quiet link to the Settings tab that holds the rest of this section.
+
+        Sending people to a general "Advanced settings…" button means they
+        arrive somewhere and still have to go looking.
+        """
+        label = QLabel(f'<a href="{tab}">{text}</a>')
+        label.setStyleSheet(muted_small())
+        label.setOpenExternalLinks(False)
+        label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        label.linkActivated.connect(self.open_settings.emit)
+        return label
+
     @staticmethod
     def _wrap(layout):
         w = QWidget()
@@ -330,10 +353,8 @@ class OptionsPanel(QWidget):
             if terms:
                 lines.append(vocab_bias.summarize(terms, vocab_bias.build(terms, draft.bias_max_chars)))
             else:
-                lines.append(
-                    "No vocabulary yet: pick a shared glossary below, or add terms "
-                    "in Settings → Audio."
-                )
+                # The link directly beneath already says where the terms live.
+                lines.append("No vocabulary yet — pick a shared glossary below, or add terms.")
         self.pipeline_status.setText("\n".join(x for x in lines if x))
 
     def _pipeline_draft(self) -> Settings:
