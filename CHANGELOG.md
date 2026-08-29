@@ -79,6 +79,11 @@ versions follow [Semantic Versioning](https://semver.org/).
   glossary tuning moved into Settings, which gained tabs (Engines, Audio, Speakers, Output,
   AI Cleanup, Plaud) rather than becoming the new long scroll.
 
+- **Speaker count moved into the Options column**, where the per-job choices are. How many people
+  are in a recording is a fact about that recording, not a preference — and telling the diarizer is
+  the largest single influence on how well it labels them. It reads "How many: at least / at most",
+  both defaulting to auto, and Settings no longer carries a second copy.
+
 ### Changed
 
 - The manual install instructions cover Windows, macOS and Linux rather than assuming `winget`.

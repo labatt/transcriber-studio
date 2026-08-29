@@ -261,14 +261,6 @@ class SettingsDialog(SheetDialog):
         self.hf.setPlaceholderText("hf_… (stored locally only)")
         df.addRow("HuggingFace token:", self.hf)
 
-        spin_row = QHBoxLayout()
-        self.minspk = QSpinBox(); self.minspk.setRange(0, 20); self.minspk.setValue(settings.min_speakers)
-        self.maxspk = QSpinBox(); self.maxspk.setRange(0, 20); self.maxspk.setValue(settings.max_speakers)
-        spin_row.addWidget(QLabel("Min:")); spin_row.addWidget(self.minspk)
-        spin_row.addWidget(QLabel("Max:")); spin_row.addWidget(self.maxspk)
-        spin_row.addWidget(QLabel("(0 = auto)")); spin_row.addStretch()
-        df.addRow("Speaker count:", self._wrap(spin_row))
-
         status = "installed ✓" if diarization.is_available() else "NOT installed — run: pip install pyannote.audio"
         lbl = WrappedNote(
             f"Status: pyannote {status}.\n"
@@ -873,8 +865,6 @@ class SettingsDialog(SheetDialog):
         self.s.language = self.lang.currentText()
         self.s.diarization_enabled = self.diar_on.isChecked()
         self.s.hf_token = self.hf.text().strip()
-        self.s.min_speakers = self.minspk.value()
-        self.s.max_speakers = self.maxspk.value()
         self.s.plaud_page_size = self.plaud_page_size.value()
         self.s.vad_threshold = self.vad_threshold.value()
         self.s.vad_min_silence_ms = self.vad_min_silence.value()

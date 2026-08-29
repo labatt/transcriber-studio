@@ -74,12 +74,28 @@ def test_the_options_column_still_owns_the_per_job_choices():
     panel.vad_on.setChecked(False)
     panel.bias_on.setChecked(False)
     panel.include_speakers.setChecked(False)
+    # How many people are in the recording is a per-recording fact.
+    panel.min_speakers.setValue(2)
+    panel.max_speakers.setValue(2)
     panel.apply_to(settings)
 
     assert settings.denoise_enabled is False
     assert settings.vad_enabled is False
     assert settings.bias_enabled is False
     assert settings.include_speakers is False
+    assert settings.min_speakers == 2
+    assert settings.max_speakers == 2
+
+
+def test_the_speaker_count_is_not_owned_by_settings_as_well():
+    """Two owners means whichever writes last wins, silently."""
+    settings = Settings(min_speakers=3, max_speakers=3)
+    dialog = SettingsDialog(settings)
+    dialog._accept()
+
+    assert settings.min_speakers == 3
+    assert settings.max_speakers == 3
+    assert not hasattr(dialog, "minspk"), "Settings still has a speaker-count control"
 
 
 def test_the_column_is_no_longer_a_wall_of_controls():

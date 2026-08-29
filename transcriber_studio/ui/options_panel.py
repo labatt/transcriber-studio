@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -148,6 +149,33 @@ class OptionsPanel(QWidget):
         self.include_speakers = QCheckBox("Label who is speaking")
         self.include_speakers.setChecked(settings.include_speakers)
         sf.addRow(self.include_speakers)
+
+        # How many people are in this recording is a fact about this recording,
+        # not a preference — and telling the diarizer is the single biggest
+        # lever on how well it does. Zero leaves it to guess.
+        count_row = QHBoxLayout()
+        count_row.setContentsMargins(0, 0, 0, 0)
+        self.min_speakers = QSpinBox()
+        self.min_speakers.setRange(0, 20)
+        self.min_speakers.setSpecialValueText("auto")
+        self.min_speakers.setValue(settings.min_speakers)
+        self.max_speakers = QSpinBox()
+        self.max_speakers.setRange(0, 20)
+        self.max_speakers.setSpecialValueText("auto")
+        self.max_speakers.setValue(settings.max_speakers)
+        for spin in (self.min_speakers, self.max_speakers):
+            spin.setToolTip(
+                "How many people are talking. Set both to the same number when "
+                "you know it — guessing the count wrong is where most bad "
+                "speaker labelling starts. Leave on auto to let the model decide."
+            )
+        count_row.addWidget(QLabel("at least"))
+        count_row.addWidget(self.min_speakers)
+        count_row.addWidget(QLabel("at most"))
+        count_row.addWidget(self.max_speakers)
+        count_row.addStretch()
+        sf.addRow("How many:", self._wrap(count_row))
+
         sf.addRow(self._settings_link(
             "Speaker detection and channels…", "Speakers"))
         root.addWidget(spk_box)
@@ -479,6 +507,8 @@ class OptionsPanel(QWidget):
         s.stt_engine = self.engine.currentData() or ENGINE_LOCAL
         s.formats = [k for k, cb in self.format_checks.items() if cb.isChecked()] or ["txt"]
         s.include_speakers = self.include_speakers.isChecked()
+        s.min_speakers = self.min_speakers.value()
+        s.max_speakers = self.max_speakers.value()
         s.output_dir = self.out_dir.text().strip() or s.output_dir
         s.ai_cleanup_enabled = self.ai_cleanup_on.isChecked()
         s.ai_cleanup_provider = self.ai_provider.currentData() or ""
