@@ -242,13 +242,15 @@ def _check_body(data: dict, action: str = "the change") -> dict:
     detail = f"{message} (status {status})" if message else f"status {status}"
     if any(hint in message.lower() for hint in DEAD_SESSION_HINTS):
         raise TokenRejected(
-            f"That token's Plaud session has ended — {detail}.\n\n"
-            "The token itself is intact; the session it came from is not. "
-            "Signing out of web.plaud.ai invalidates every token that session "
-            "issued, including one saved here earlier.\n\n"
-            "Sign in at web.plaud.ai, then copy the refreshToken that is there "
-            "now — Local Storage → the key ending in :workspaceList. Copy it "
-            "before signing out again, or it will be dead too."
+            f"Plaud retired this token — {detail}, refusing {action}.\n\n"
+            "Refresh tokens are single use: spending one retires it and Plaud "
+            "issues a replacement. This app now saves the replacement, but the "
+            "browser does not know about it, so the copy still sitting in "
+            "localStorage is the retired one and copying it again will fail "
+            "the same way.\n\n"
+            "To start over: sign out of web.plaud.ai and back in. That issues "
+            "a new refresh token. Copy it once, and this app will keep it "
+            "current from then on."
         )
     raise PlaudWebError(f"Plaud refused {action}: {detail}")
 
@@ -342,7 +344,9 @@ def refresh_workspace_token(
                 token, moved, wid, timeout=timeout, _redirected=True
             )
 
-    data = _check_body(body, "the token refresh").get("data") or {}
+    data = _check_body(
+        body, f"the token refresh at {url.rsplit(base, 1)[-1]}"
+    ).get("data") or {}
     minted = data.get("workspace_token") or data.get("access_token") or ""
     if not minted:
         raise PlaudWebError("Plaud's refresh reply carried no workspace token.")

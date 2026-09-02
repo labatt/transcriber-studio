@@ -428,9 +428,11 @@ def test_a_dead_session_says_to_copy_a_fresh_token(monkeypatch):
     with pytest.raises(plaud_web.TokenRejected) as excinfo:
         plaud_web.refresh_workspace_token(_refresh_token())
     text = str(excinfo.value)
-    assert "session has ended" in text
-    assert "workspaceList" in text
+    assert "single use" in text
+    assert "sign out of web.plaud.ai and back in" in text
     assert "status -1001" in text          # the code stays visible for diagnosis
+    # Which call was refused, so a bad endpoint is never mistaken for a bad token
+    assert "/user-app/auth/workspace/refresh/" in text
 
 
 def test_an_ordinary_refusal_names_what_was_refused(monkeypatch):
