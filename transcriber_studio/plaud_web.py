@@ -160,10 +160,12 @@ def inspect_token(token: str) -> TokenInfo:
     workspace tokens last 24 hours and the refresh token 30 days. Nothing here
     lasts a year.
 
-    WT is not a mistake to refuse. The web app puts the *workspace* token on
-    the Authorization header for these calls — confirmed against a live
-    session — so it is the one that works. Only WRT is rejected, because it
-    mints tokens rather than being one.
+    None of the three is a mistake to accept. The web app puts the *workspace*
+    token on the Authorization header for these calls — confirmed against a
+    live session — so WT works directly, and WRT is better still because
+    :func:`refresh_workspace_token` spends it on a fresh WT for 30 days. A WRT
+    with no ``wid`` is the one thing refused: there is nothing to refresh
+    against.
     """
     value = normalize_token(token)
     payload = _decode_payload(value)
@@ -210,7 +212,14 @@ def validate_token(token: str) -> TokenInfo:
     return info
 
 
-def _check_body(data: dict) -> dict:
+#: Plaud's wording when a token is well-formed but its session is gone —
+#: "invalid or session expired, re-exchange required". Signing out of
+#: web.plaud.ai does this to every token that session issued, so it says
+#: "copy a fresh one", not "something went wrong".
+DEAD_SESSION_HINTS = ("re-exchange", "session expired", "session has expired")
+
+
+def _check_body(data: dict, action: str = "the change") -> dict:
     """Raise on a failure that arrived wearing an HTTP 200.
 
     This API reports its own errors in the body and still answers 200. A caller
@@ -227,8 +236,21 @@ def _check_body(data: dict) -> dict:
             + (f" ({right_host})." if right_host else ".")
             + "\n\nChange the server in Settings → Plaud rename and try again."
         )
-    message = data.get("msg") or data.get("message") or f"status {status}"
-    raise PlaudWebError(f"Plaud refused the change: {message}")
+    message = str(data.get("msg") or data.get("message") or "")
+    # The status number is kept in the text: it is the only handle on an
+    # undocumented API when a message turns out not to mean what it says.
+    detail = f"{message} (status {status})" if message else f"status {status}"
+    if any(hint in message.lower() for hint in DEAD_SESSION_HINTS):
+        raise TokenRejected(
+            f"That token's Plaud session has ended — {detail}.\n\n"
+            "The token itself is intact; the session it came from is not. "
+            "Signing out of web.plaud.ai invalidates every token that session "
+            "issued, including one saved here earlier.\n\n"
+            "Sign in at web.plaud.ai, then copy the refreshToken that is there "
+            "now — Local Storage → the key ending in :workspaceList. Copy it "
+            "before signing out again, or it will be dead too."
+        )
+    raise PlaudWebError(f"Plaud refused {action}: {detail}")
 
 
 @dataclass(frozen=True)
@@ -320,7 +342,7 @@ def refresh_workspace_token(
                 token, moved, wid, timeout=timeout, _redirected=True
             )
 
-    data = _check_body(body).get("data") or {}
+    data = _check_body(body, "the token refresh").get("data") or {}
     minted = data.get("workspace_token") or data.get("access_token") or ""
     if not minted:
         raise PlaudWebError("Plaud's refresh reply carried no workspace token.")

@@ -413,3 +413,33 @@ def test_a_plain_workspace_token_is_used_as_is_without_refreshing(monkeypatch):
     client = _client(monkeypatch, {"status": 0}, seen=seen)
     client.rename("abc123", "Weekly sync")
     assert seen["headers"]["Authorization"].startswith("Bearer ")
+
+
+def test_a_dead_session_says_to_copy_a_fresh_token(monkeypatch):
+    """Plaud's "re-exchange required" means the session ended, not a bad token.
+
+    Signing out of web.plaud.ai kills every token that session issued, so this
+    has to read as "copy the current one", not as a generic refusal.
+    """
+    _fake_post(
+        monkeypatch,
+        {"status": -1001, "msg": "invalid or session expired, re-exchange required"},
+    )
+    with pytest.raises(plaud_web.TokenRejected) as excinfo:
+        plaud_web.refresh_workspace_token(_refresh_token())
+    text = str(excinfo.value)
+    assert "session has ended" in text
+    assert "workspaceList" in text
+    assert "status -1001" in text          # the code stays visible for diagnosis
+
+
+def test_an_ordinary_refusal_names_what_was_refused(monkeypatch):
+    _fake_post(monkeypatch, {"status": -7, "msg": "nope"})
+    with pytest.raises(plaud_web.PlaudWebError, match="refused the token refresh"):
+        plaud_web.refresh_workspace_token(_refresh_token())
+
+
+def test_a_rename_refusal_still_names_the_change(monkeypatch):
+    client = _client(monkeypatch, {"status": -7, "msg": "nope"})
+    with pytest.raises(plaud_web.PlaudWebError, match="refused the change"):
+        client.rename("abc123", "New name")
