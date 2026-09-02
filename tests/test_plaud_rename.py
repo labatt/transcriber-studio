@@ -443,3 +443,39 @@ def test_a_rename_refusal_still_names_the_change(monkeypatch):
     client = _client(monkeypatch, {"status": -7, "msg": "nope"})
     with pytest.raises(plaud_web.PlaudWebError, match="refused the change"):
         client.rename("abc123", "New name")
+
+
+def test_checking_a_refresh_token_mints_and_is_satisfied(monkeypatch):
+    """Minting is itself an authenticated call, so it is the whole check."""
+    calls = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        calls.append(url)
+        return _Response(
+            {"status": 0, "data": {"workspace_token": "wt", "expires_in": 86400}}
+        )
+
+    monkeypatch.setattr(plaud_web.requests, "post", fake_post)
+    monkeypatch.setattr(
+        plaud_web.requests, "request",
+        lambda *a, **k: pytest.fail("check must not call a guessed read endpoint"),
+    )
+    plaud_web.PlaudWebClient(_refresh_token()).check()
+    assert len(calls) == 1
+
+
+def test_checking_a_refresh_token_surfaces_a_refusal(monkeypatch):
+    _fake_post(monkeypatch, {}, status_code=401)
+    with pytest.raises(plaud_web.TokenRejected):
+        plaud_web.PlaudWebClient(_refresh_token()).check()
+
+
+def test_checking_a_workspace_token_says_it_cannot_tell(monkeypatch):
+    """Better than the old guess at /team-app/workspaces/list, which answered
+    status -1 for every token, good or bad."""
+    monkeypatch.setattr(
+        plaud_web.requests, "request",
+        lambda *a, **k: pytest.fail("no read endpoint is known to exist"),
+    )
+    with pytest.raises(plaud_web.PlaudWebError, match="cannot say whether it works"):
+        plaud_web.PlaudWebClient(_user_token()).check()

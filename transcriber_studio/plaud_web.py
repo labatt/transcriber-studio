@@ -436,9 +436,26 @@ class PlaudWebClient:
 
     # ---- the only two calls -------------------------------------------
     def check(self) -> None:
-        """Prove the token works, without changing anything. Raises on failure."""
-        self._request(
-            "GET", "/team-app/workspaces/list?need_personal_workspace=true"
+        """Prove the token works, without changing anything. Raises on failure.
+
+        A refresh token proves itself: minting is a real authenticated call to
+        a real endpoint, and Plaud will not hand back a workspace token for a
+        credential it does not accept. Nothing further is worth asking.
+
+        A pasted workspace token has no such call behind it, so it has to be
+        spent on something. There is no known read-only endpoint to spend it
+        on — ``/team-app/workspaces/list`` was a guess and answers status -1,
+        "invalid request" — so this reports honestly that it cannot tell,
+        rather than inventing a pass or failing a token that may be fine.
+        """
+        if self._refresh_token:
+            self._ensure_token()
+            return
+        raise PlaudWebError(
+            "A workspace token cannot be checked without spending it on a "
+            "rename, so this cannot say whether it works — only a rename will "
+            "tell you.\n\nPaste the refreshToken instead and this can verify "
+            "it properly: it lasts 30 days, and checking it is a real call."
         )
 
     def rename(self, file_id: str, filename: str) -> None:
