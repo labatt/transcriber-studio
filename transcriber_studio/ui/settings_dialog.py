@@ -693,7 +693,7 @@ class SettingsDialog(SheetDialog):
 
         self.plaud_web_token = QLineEdit(settings.plaud_web_token)
         self.plaud_web_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.plaud_web_token.setPlaceholderText("paste the pld_ut cookie")
+        self.plaud_web_token.setPlaceholderText("paste the refreshToken")
         form.addRow("Web token:", self.plaud_web_token)
 
         self.plaud_web_region = QComboBox()
@@ -733,12 +733,13 @@ class SettingsDialog(SheetDialog):
                 "keeps working either way.",
                 "",
                 "To get the token: sign in at web.plaud.ai, then open "
-                "DevTools → Application → Cookies → "
-                "https://web.plaud.ai and copy the value of pld_ut. It lasts "
-                "about a year.",
+                "DevTools → Application → Local Storage → https://web.plaud.ai "
+                "and find the key ending in :workspaceList. Copy the "
+                "refreshToken out of it — that one lasts 30 days, and this "
+                "app spends it on the short-lived tokens it needs.",
                 "",
-                "Do not copy the Authorization header from the network tab: "
-                "that is a different, one-day token, and it is refused here.",
+                "The workspaceToken beside it also works, but only for 24 "
+                "hours, so you would be back here tomorrow.",
             ])
         )
         note.setWordWrap(True)

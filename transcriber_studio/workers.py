@@ -305,9 +305,6 @@ class TokenCheckWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
             return
-        days = info.days_left
-        self.done.emit(
-            f"Token accepted — about {days} days left."
-            if days is not None
-            else "Token accepted."
-        )
+        # Not days_left: the user token is minted for 24 hours, so whole days
+        # rounds almost every good token down to "0 days left".
+        self.done.emit(f"Token accepted — {info.describe_remaining()} left.")
