@@ -56,6 +56,7 @@ Screenshots land in `.claude/skills/run-transcriber-studio/shots/<name>.png`.
 | `tabs`, `tab <index\|title>` | list / switch tabs |
 | `click <label\|objectName>` | click a button: exact, then *unique prefix*. Never a bare substring. |
 | `click! <label>` | override the guard on a destructive button (see Gotchas) |
+| | both are **deferred** — they answer `(queued)`; `wait` before asserting |
 | `text <attr>`, `log`, `state` | read a widget, the log pane, or a summary line |
 | `eval <expr>` / `exec <stmt>` | arbitrary Python; `w` is MainWindow, `app` the QApplication |
 | `dismiss` | close any open modal dialog |
@@ -139,6 +140,14 @@ python -m pytest -q      # 392 passed in 49.87s
   turned `click Go` into a click on **Logout** ('go' is inside 'Logout'), which
   deleted `~/.plaud/tokens.json` and cost an interactive browser re-login.
   Matching is now exact-then-unique-prefix, and these need `click! <label>`.
+- **A button that opens a modal blocks the command that clicked it.** Settings,
+  Setup and Glossary run `QDialog.exec()` inside their own click handler, so an
+  inline `b.click()` wedged the driver for the whole session — `click Settings`
+  hung for 300s and never printed its `OK`. `click` now fires the button from a
+  `QTimer.singleShot`, so it returns immediately and answers `OK ... (queued)`;
+  follow it with `wait` before asserting on the dialog, and `dismiss` to close.
+  `quit` rejects any open dialog first, because `app.quit()` cannot unwind a
+  modal's nested loop on its own.
 - **Don't `time.sleep()` inside a command** — it freezes the Qt loop and the
   app makes no progress. `wait` uses a nested `QEventLoop` for this reason.
 

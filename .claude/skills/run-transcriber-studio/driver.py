@@ -189,6 +189,11 @@ def main() -> int:
         rest = rest.strip()
 
         if cmd == "quit":
+            # Close modals first: a QDialog.exec() loop swallows app.quit(),
+            # so a session that opened one would otherwise never exit.
+            for d in app.topLevelWidgets():
+                if isinstance(d, QDialog) and d.isVisible():
+                    d.reject()
             out("OK quit")
             return False
         if cmd == "wait":
@@ -262,8 +267,14 @@ def main() -> int:
                 )
             if not b.isEnabled():
                 raise RuntimeError(f"button {b.text()!r} is disabled")
-            b.click()
-            out(f"OK click {b.text()!r}")
+            # Deferred, not called here. A button that opens a modal (Settings,
+            # Setup, Glossary) runs QDialog.exec() inside its own handler, and
+            # calling it inline wedges this command before it can even print --
+            # `click Settings` hung a whole session that way. Firing it from a
+            # singleShot lets the command return first, so the dialog opens with
+            # the driver already back at the prompt and `dismiss` still reachable.
+            QTimer.singleShot(0, b.click)
+            out(f"OK click {b.text()!r} (queued)")
         elif cmd == "text":
             out(f"OK text {getattr(w, rest).text()!r}")
         elif cmd == "log":
