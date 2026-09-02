@@ -479,3 +479,50 @@ def test_checking_a_workspace_token_says_it_cannot_tell(monkeypatch):
     )
     with pytest.raises(plaud_web.PlaudWebError, match="cannot say whether it works"):
         plaud_web.PlaudWebClient(_user_token()).check()
+
+
+def test_a_rotated_refresh_token_is_handed_back_for_saving(monkeypatch):
+    """Plaud rotates the refresh token as it spends it, and retires the old one.
+
+    Dropping the replacement is why a second run met "re-exchange required":
+    the saved token had already been consumed.
+    """
+    original = _refresh_token()
+    _fake_post(
+        monkeypatch,
+        {
+            "status": 0,
+            "data": {
+                "workspace_token": "wt",
+                "expires_in": 86400,
+                "refresh_token": "rotated.wrt",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        plaud_web.requests, "request", lambda *a, **k: _Response({"status": 0})
+    )
+    saved = []
+    client = plaud_web.PlaudWebClient(original)
+    client.on_refresh = lambda creds: saved.append(creds.refresh_token)
+    client.rename("abc", "n")
+
+    assert saved == ["rotated.wrt"]
+
+
+def test_an_unrotated_token_still_reports_the_current_one(monkeypatch):
+    """No refresh_token in the reply means unchanged, not blank."""
+    original = _refresh_token()
+    _fake_post(
+        monkeypatch,
+        {"status": 0, "data": {"workspace_token": "wt", "expires_in": 86400}},
+    )
+    monkeypatch.setattr(
+        plaud_web.requests, "request", lambda *a, **k: _Response({"status": 0})
+    )
+    saved = []
+    client = plaud_web.PlaudWebClient(original)
+    client.on_refresh = lambda creds: saved.append(creds.refresh_token)
+    client.rename("abc", "n")
+
+    assert saved == [original]

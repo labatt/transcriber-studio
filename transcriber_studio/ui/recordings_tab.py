@@ -309,10 +309,21 @@ class RecordingsTab(QWidget):
         worker = RenameWorker(self.s, rec.id, new_name, parent=self)
         worker.done.connect(self._on_rename_pushed)
         worker.error.connect(self._on_rename_failed)
+        worker.rotated.connect(self._store_rotated_token)
         # Held so the thread is not collected mid-flight; dropped when it ends.
         self._rename_workers[rec.id] = worker
         worker.finished.connect(lambda rid=rec.id: self._rename_workers.pop(rid, None))
         worker.start()
+
+    def _store_rotated_token(self, token: str) -> None:
+        """Plaud swapped the refresh token while renaming; save the new one.
+
+        The one that was saved is now dead, so leaving it there would turn the
+        next rename into a "re-exchange required" and send the user back to
+        DevTools for no reason.
+        """
+        self.s.plaud_web_token = token
+        config.save(self.s)
 
     def _set_name_cell(self, row: int, rec: Recording):
         """Repaint one Name cell without the write looking like a fresh edit."""

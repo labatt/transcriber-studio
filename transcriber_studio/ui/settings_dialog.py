@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from .. import (
     ai_providers,
+    config,
     denoise,
     diarization,
     plaud_web,
@@ -762,10 +763,22 @@ class SettingsDialog(SheetDialog):
         )
         self._token_worker.done.connect(self.plaud_token_status.setText)
         self._token_worker.error.connect(self.plaud_token_status.setText)
+        self._token_worker.rotated.connect(self._store_rotated_token)
         self._token_worker.finished.connect(
             lambda: self.plaud_token_check.setEnabled(True)
         )
         self._token_worker.start()
+
+    def _store_rotated_token(self, token: str) -> None:
+        """Plaud replaced the refresh token while spending it; keep the new one.
+
+        Written straight through rather than waiting for Save: the token that
+        was in the box is now dead, so a user who checks a token and then hits
+        Cancel would otherwise be left with a credential that cannot work.
+        """
+        self.plaud_web_token.setText(token)
+        self.s.plaud_web_token = token
+        config.save(self.s)
 
     def select_tab(self, title: str) -> bool:
         """Open on a named tab. Unknown or empty names leave it on the first."""

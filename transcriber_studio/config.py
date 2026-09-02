@@ -154,7 +154,9 @@ class Settings:
     # cannot rename. Renaming still works with this off — the name just stays
     # in this app.
     plaud_rename_push: bool = False
-    plaud_web_token: str = ""       # the pld_ut cookie, stored locally only
+    # The workspaceList refreshToken, stored locally only. Rewritten
+    # whenever Plaud rotates it, or the saved copy stops working.
+    plaud_web_token: str = ""
     plaud_web_region: str = "global"    # global | eu | apac
 
     # --- UI state ---

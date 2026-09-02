@@ -258,6 +258,10 @@ class RenameWorker(QThread):
 
     done = Signal(str)          # file_id — Plaud accepted the name
     error = Signal(str, str)    # file_id, message
+    # Plaud rotates the refresh token as it spends it, and the one it replaces
+    # stops working. Losing the replacement means the next run pastes a dead
+    # token and gets "re-exchange required", so it has to be saved.
+    rotated = Signal(str)       # a refresh token that replaced the saved one
 
     def __init__(self, settings: Settings, file_id: str, name: str, parent=None):
         super().__init__(parent)
@@ -275,11 +279,17 @@ class RenameWorker(QThread):
                     self.settings.plaud_web_region, plaud_web.DEFAULT_HOST
                 ),
             )
+            client.on_refresh = self._remember
             client.rename(self.file_id, self.name)
             name_store.mark_pushed(self.file_id)
             self.done.emit(self.file_id)
         except Exception as e:
             self.error.emit(self.file_id, str(e))
+
+    def _remember(self, creds) -> None:
+        """Hand a rotated refresh token to the UI thread, which owns saving."""
+        if creds.refresh_token and creds.refresh_token != self.settings.plaud_web_token:
+            self.rotated.emit(creds.refresh_token)
 
 
 class TokenCheckWorker(QThread):
@@ -287,6 +297,7 @@ class TokenCheckWorker(QThread):
 
     done = Signal(str)      # a short description of what was accepted
     error = Signal(str)
+    rotated = Signal(str)   # a refresh token that replaced the one checked
 
     def __init__(self, token: str, region: str, parent=None):
         super().__init__(parent)
@@ -300,6 +311,14 @@ class TokenCheckWorker(QThread):
             info = plaud_web.validate_token(self.token)
             client = plaud_web.PlaudWebClient(
                 self.token, plaud_web.API_HOSTS.get(self.region, plaud_web.DEFAULT_HOST)
+            )
+            # Checking a refresh token spends it, and Plaud may hand back a
+            # replacement. Dropping that would leave the saved token dead the
+            # moment this check succeeds.
+            client.on_refresh = lambda creds: (
+                self.rotated.emit(creds.refresh_token)
+                if creds.refresh_token and creds.refresh_token != self.token
+                else None
             )
             client.check()
         except Exception as e:
