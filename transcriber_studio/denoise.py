@@ -180,11 +180,20 @@ def enhance(
     log_cb=None,
     progress_cb=None,
     should_cancel: ShouldCancel = None,
+    preserve_channels: bool = False,
 ) -> str:
     """Return a denoised copy of ``path``, or ``path`` itself if that is not on.
 
     Never raises for a denoiser problem: a failed front-end means the job runs
     on the original audio, which is exactly what it did before.
+
+    ``preserve_channels`` keeps a multi-channel recording multi-channel. Every
+    denoiser here is mono — DeepFilterNet's model is mono by construction — so
+    the plain path downmixes, which is right for one decoder reading one mixed
+    signal. It is wrong for per-channel mode, where each channel *is* a speaker:
+    a downmixed file arrives at split_channels() looking like mono and the whole
+    recording collapses to one speaker. So each channel is denoised separately
+    and the results are interleaved back together.
     """
     def log(msg: str) -> None:
         if log_cb:
@@ -195,6 +204,11 @@ def enhance(
         if settings.denoise_enabled:
             log(f"Denoise: {describe(settings)}")
         return path
+
+    if preserve_channels and _channel_count(path) > 1:
+        return _enhance_per_channel(
+            path, settings, backend, log, progress_cb, should_cancel
+        )
 
     cached = _cached_path(path, backend, settings)
     if cached.exists():
@@ -237,6 +251,99 @@ def enhance(
     elapsed = time.monotonic() - started
     log(f"Denoise: done in {elapsed:.0f}s — {cached.name}")
     return str(cached)
+
+
+def _channel_count(path: str) -> int:
+    try:
+        return max(1, int(probe(path).get("channels") or 1))
+    except Exception:
+        return 1
+
+
+def _enhance_per_channel(
+    path: str, settings: Settings, backend: str, log, progress_cb, should_cancel,
+) -> str:
+    """Denoise each channel on its own, then interleave them back together.
+
+    Costs one denoiser pass per channel. That is the price of keeping the
+    channels apart, and per-channel mode exists precisely because those
+    channels are worth more than the time saved by mixing them.
+
+    The per-channel passes run on temporary files, so they do not reuse the
+    chunk store between runs the way the mono path does; an interrupted
+    per-channel denoise starts over.
+    """
+    from .audio_utils import split_channels
+
+    cached = _cached_path(path, backend, settings, preserve_channels=True)
+    if cached.exists():
+        log(f"Denoise: reusing the enhanced audio from an earlier run ({cached.name}).")
+        return str(cached)
+
+    channels = _channel_count(path)
+    log(f"Denoise: {channels} channels, cleaned separately so they stay apart.")
+    work = Path(tempfile.mkdtemp(prefix="pws_dnch_"))
+    parts: list[tuple[str, str]] = []
+    try:
+        parts = split_channels(path, None)
+        cleaned: list[str] = []
+        for index, (label, wav) in enumerate(parts):
+            check_cancel(should_cancel, log, message="Denoise: cancelled.")
+            log(f"Denoise: {label} ({index + 1}/{len(parts)})…")
+
+            def channel_progress(fraction: float, i=index) -> None:
+                if progress_cb:
+                    progress_cb((i + fraction) / len(parts))
+
+            cleaned.append(
+                enhance(
+                    wav,
+                    settings,
+                    log_cb=None,   # the per-channel chatter is not worth the log
+                    progress_cb=channel_progress,
+                    should_cancel=should_cancel,
+                )
+            )
+        if any(Path(c).resolve() == Path(w).resolve() for c, (_, w) in zip(cleaned, parts, strict=True)):
+            # At least one channel came back untouched, which enhance() only
+            # does when it failed. Merging a clean channel with a dirty one
+            # would be worse than leaving the recording alone.
+            log("Denoise: a channel could not be cleaned — using the original audio.")
+            return path
+        merged = _merge_channels(cleaned, work / "merged.wav", should_cancel, log)
+        _store(merged, cached)
+    except JobCancelled:
+        raise
+    except Exception as e:
+        log(f"Denoise failed ({e}) — transcribing the original audio instead.")
+        return path
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        for _label, wav in parts:
+            shutil.rmtree(Path(wav).parent, ignore_errors=True)
+
+    log(f"Denoise: done — {channels} channels kept separate ({cached.name}).")
+    return str(cached)
+
+
+def _merge_channels(wavs: list[str], dest: Path, should_cancel, log) -> Path:
+    """Interleave mono files back into one file with a channel each."""
+    if len(wavs) == 1:
+        shutil.copy2(wavs[0], dest)
+        return dest
+    inputs: list[str] = []
+    for wav in wavs:
+        inputs.extend(["-i", str(wav)])
+    labels = "".join(f"[{i}:a]" for i in range(len(wavs)))
+    _run(
+        [
+            FFMPEG, "-y", *inputs,
+            "-filter_complex", f"{labels}amerge=inputs={len(wavs)}[a]",
+            "-map", "[a]", "-ar", str(PIPELINE_SAMPLE_RATE), str(dest),
+        ],
+        should_cancel, log, "merging the cleaned channels",
+    )
+    return dest
 
 
 # ---- backends --------------------------------------------------------
@@ -503,8 +610,15 @@ def _stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
-def cache_key(path: str, backend: str, settings: Settings) -> str:
-    """Same audio, same backend, same settings — same enhanced file."""
+def cache_key(
+    path: str, backend: str, settings: Settings, preserve_channels: bool = False
+) -> str:
+    """Same audio, same backend, same settings — same enhanced file.
+
+    ``preserve_channels`` is part of the key because the two modes produce
+    genuinely different files from the same input: one mono, one still split
+    per channel. Sharing a key would hand a per-channel run the downmix.
+    """
     source = Path(path)
     try:
         stat = source.stat()
@@ -519,13 +633,16 @@ def cache_key(path: str, backend: str, settings: Settings) -> str:
             settings.denoise_model_path.strip(),
             "pf" if settings.denoise_postfilter else "",
             str(settings.denoise_atten_lim_db),
+            "per_channel" if preserve_channels else "downmix",
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
-def _cached_path(path: str, backend: str, settings: Settings) -> Path:
-    return CACHE_DIR / f"{cache_key(path, backend, settings)}.wav"
+def _cached_path(
+    path: str, backend: str, settings: Settings, preserve_channels: bool = False
+) -> Path:
+    return CACHE_DIR / f"{cache_key(path, backend, settings, preserve_channels)}.wav"
 
 
 def _store(produced: Path, dest: Path) -> None:

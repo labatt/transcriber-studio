@@ -1130,6 +1130,10 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         renames = dlg.renames()
+        # Remembering a voice is worth doing even when nothing was renamed:
+        # a speaker the app recognised correctly can still be worth a second
+        # sample from a different microphone.
+        dlg.apply_enrollments(log=self._log)
         if not renames:
             return
         apply_speaker_renames(result.transcript, renames)

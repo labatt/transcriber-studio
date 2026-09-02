@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import audio_utils
@@ -25,6 +25,8 @@ from .job_cancel import check_cancel
 #: twice. Keyed by audio content and speaker bounds, so any change re-runs it.
 CACHE_DIR = APP_DIR / "diarization_cache"
 CACHE_KEEP = 24
+#: v2 added the per-speaker embeddings that voiceprint matching needs.
+CACHE_VERSION = "v2"
 
 # pyannote 4.x recommended pipeline; pulls in segmentation + community assets.
 DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
@@ -78,6 +80,31 @@ class SpeakerTurn:
     speaker: str  # raw label like SPEAKER_00
 
 
+@dataclass
+class DiarizationResult:
+    """Turns, plus the vector the pipeline clustered each speaker around.
+
+    The embeddings are the pipeline's own working: it has to compare speakers
+    to group them, and the centroid it settles on is a description of that
+    voice pooled over everything they said. Keeping it is what lets a speaker
+    be recognised in the next recording instead of being Speaker 2 again.
+    """
+
+    turns: list[SpeakerTurn] = field(default_factory=list)
+    #: raw label -> centroid. Empty when the pipeline did not provide any.
+    embeddings: dict[str, list[float]] = field(default_factory=dict)
+
+    def speech_seconds(self) -> dict[str, float]:
+        """How long each speaker actually spoke, which decides who can be
+        recognised: a centroid from a few seconds describes nobody."""
+        totals: dict[str, float] = {}
+        for turn in self.turns:
+            totals[turn.speaker] = totals.get(turn.speaker, 0.0) + max(
+                0.0, turn.end - turn.start
+            )
+        return totals
+
+
 def cache_key(audio_path: str, min_speakers: int, max_speakers: int) -> str:
     """Same audio and same speaker bounds — same turns."""
     source = Path(audio_path)
@@ -89,6 +116,10 @@ def cache_key(audio_path: str, min_speakers: int, max_speakers: int) -> str:
     material = "|".join([
         str(source.resolve()), stamp, DIARIZATION_MODEL,
         str(min_speakers), str(max_speakers),
+        # Bumped when the payload gains a field. Without this, every cache hit
+        # from before speaker embeddings were stored would come back without
+        # them, and voiceprint matching would quietly never run again.
+        CACHE_VERSION,
     ])
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
@@ -97,26 +128,37 @@ def cache_path(audio_path: str, min_speakers: int, max_speakers: int) -> Path:
     return CACHE_DIR / f"{cache_key(audio_path, min_speakers, max_speakers)}.json"
 
 
-def load_cached(path: Path) -> list[SpeakerTurn] | None:
-    """Turns from an earlier run, or None if there are none worth trusting."""
+def load_cached(path: Path) -> DiarizationResult | None:
+    """A previous run's result, or None if there is none worth trusting."""
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [
+        turns = [
             SpeakerTurn(start=float(t["start"]), end=float(t["end"]), speaker=str(t["speaker"]))
-            for t in data
+            for t in data["turns"]
         ]
+        embeddings = {
+            str(label): [float(x) for x in vector]
+            for label, vector in (data.get("embeddings") or {}).items()
+        }
+        return DiarizationResult(turns=turns, embeddings=embeddings)
     except (OSError, ValueError, KeyError, TypeError):
         return None    # unreadable or half-written: just diarize again
 
 
-def save_cached(path: Path, turns: list[SpeakerTurn]) -> None:
+def save_cached(path: Path, result: DiarizationResult) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps([{"start": t.start, "end": t.end, "speaker": t.speaker} for t in turns]),
+            json.dumps({
+                "turns": [
+                    {"start": t.start, "end": t.end, "speaker": t.speaker}
+                    for t in result.turns
+                ],
+                "embeddings": result.embeddings,
+            }),
             encoding="utf-8",
         )
         tmp.replace(path)    # never leave a half-written file where a read looks
@@ -262,6 +304,44 @@ def _turns_from_pipeline_output(output) -> list[SpeakerTurn]:
     return turns
 
 
+def _embeddings_from_pipeline_output(output) -> dict[str, list[float]]:
+    """One centroid per speaker, keyed by the label the turns use.
+
+    pyannote hands back a ``(num_speakers, dim)`` array ordered to match
+    ``speaker_diarization.labels()`` — the non-exclusive annotation, which is
+    not necessarily the one the turns were read from, so the labels come from
+    there rather than from the turns.
+
+    Two things are guarded. The array can be shorter than the label list, in
+    which case pyannote pads it with zero rows that describe nobody; and older
+    pipelines do not return embeddings at all, which is not an error — it just
+    means no speaker can be recognised from this run.
+    """
+    raw = getattr(output, "speaker_embeddings", None)
+    annotation = getattr(output, "speaker_diarization", None)
+    if raw is None or annotation is None:
+        return {}
+    try:
+        import numpy as np
+
+        matrix = np.asarray(raw, dtype=np.float64)
+        labels = list(annotation.labels())
+    except Exception:
+        return {}
+    if matrix.ndim != 2 or not matrix.size:
+        return {}
+    out: dict[str, list[float]] = {}
+    for index, label in enumerate(labels):
+        if index >= matrix.shape[0]:
+            break
+        row = matrix[index]
+        # A zero row is pyannote's padding for a speaker it never clustered.
+        if not np.isfinite(row).all() or float(np.linalg.norm(row)) <= 0.0:
+            continue
+        out[str(label)] = [float(x) for x in row]
+    return out
+
+
 class Diarizer:
     """Wraps a pyannote pipeline; caches the loaded pipeline per token."""
 
@@ -318,14 +398,14 @@ class Diarizer:
         progress_cb=None,
         log_cb=None,
         should_cancel=None,
-    ) -> list[SpeakerTurn]:
+    ) -> DiarizationResult:
         cached_at = cache_path(audio_path, min_speakers, max_speakers)
         cached = load_cached(cached_at)
         if cached is not None:
             if log_cb:
                 log_cb(
                     f"Reusing speaker detection from an earlier run — "
-                    f"{len({t.speaker for t in cached})} speaker(s), nothing to redo."
+                    f"{len({t.speaker for t in cached.turns})} speaker(s), nothing to redo."
                 )
             if progress_cb:
                 progress_cb(1.0)
@@ -353,14 +433,17 @@ class Diarizer:
         )
         with hook:
             output = pipeline(audio, hook=hook, **kwargs)
-        turns = _turns_from_pipeline_output(output)
-        save_cached(cached_at, turns)
+        result = DiarizationResult(
+            turns=_turns_from_pipeline_output(output),
+            embeddings=_embeddings_from_pipeline_output(output),
+        )
+        save_cached(cached_at, result)
         prune()
         if log_cb:
-            log_cb(f"Found {len({t.speaker for t in turns})} speaker(s).")
+            log_cb(f"Found {len({t.speaker for t in result.turns})} speaker(s).")
         if progress_cb:
             progress_cb(1.0)
-        return turns
+        return result
 
 
 def assign_speaker(start: float, end: float, turns: list[SpeakerTurn]) -> str | None:

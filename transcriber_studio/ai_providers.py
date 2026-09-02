@@ -45,6 +45,35 @@ PROVIDERS: dict[str, ProviderSpec] = {
 }
 
 
+#: Ollama sizes its context window per request and defaults to about 4k tokens,
+#: silently dropping whatever does not fit rather than refusing the request. A
+#: cleanup batch is far larger than that, so the model would see a fragment,
+#: answer for a fragment, and the caller would read the short answer as a batch
+#: that needs splitting — halving forever, because the batch was never the
+#: problem. So num_ctx is always sent, sized to the prompt actually being made.
+OLLAMA_CHARS_PER_TOKEN = 3.5
+OLLAMA_MIN_NUM_CTX = 4_096
+#: Every token of context costs KV-cache memory on the machine the user is
+#: sitting at. 32k holds a large cleanup batch and still loads on a laptop.
+OLLAMA_MAX_NUM_CTX = 32_768
+OLLAMA_CTX_HEADROOM_TOKENS = 512
+
+
+def ollama_num_ctx(system_prompt: str, user_prompt: str, max_output_tokens: int) -> int:
+    """A context window big enough for this prompt and its answer.
+
+    Rounded up to a power of two because that is how these runtimes like their
+    cache shapes, and clamped so one huge batch cannot try to allocate a window
+    the machine has no memory for.
+    """
+    prompt_tokens = (len(system_prompt) + len(user_prompt)) / OLLAMA_CHARS_PER_TOKEN
+    needed = int(prompt_tokens + max(0, max_output_tokens) + OLLAMA_CTX_HEADROOM_TOKENS)
+    size = OLLAMA_MIN_NUM_CTX
+    while size < needed and size < OLLAMA_MAX_NUM_CTX:
+        size *= 2
+    return min(size, OLLAMA_MAX_NUM_CTX)
+
+
 class ProviderError(RuntimeError):
     pass
 
@@ -614,10 +643,17 @@ def _chat_ollama_cloud(
         "stream": False,
         "format": "json",
     }
+    options: dict[str, Any] = {
+        "num_predict": profile.max_tokens,
+        "num_ctx": ollama_num_ctx(
+            system_prompt,
+            _combined_user_prompt(cacheable_user_prefix, user_prompt),
+            profile.max_tokens,
+        ),
+    }
     if not profile.omit_temperature:
-        body["options"] = {"temperature": profile.temperature, "num_predict": profile.max_tokens}
-    else:
-        body["options"] = {"num_predict": profile.max_tokens}
+        options["temperature"] = profile.temperature
+    body["options"] = options
     r = requests.post(
         "https://ollama.com/api/chat",
         headers={"Authorization": f"Bearer {_key(settings, 'ollama_cloud')}"},
@@ -657,10 +693,17 @@ def _chat_ollama_local(
         "stream": False,
         "format": "json",
     }
+    options: dict[str, Any] = {
+        "num_predict": profile.max_tokens,
+        "num_ctx": ollama_num_ctx(
+            system_prompt,
+            _combined_user_prompt(cacheable_user_prefix, user_prompt),
+            profile.max_tokens,
+        ),
+    }
     if not profile.omit_temperature:
-        body["options"] = {"temperature": profile.temperature, "num_predict": profile.max_tokens}
-    else:
-        body["options"] = {"num_predict": profile.max_tokens}
+        options["temperature"] = profile.temperature
+    body["options"] = options
     r = requests.post(f"{base}/api/chat", json=body, timeout=timeout)
     if not r.ok:
         raise ProviderError(_http_error_text(r))

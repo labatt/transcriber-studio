@@ -104,6 +104,8 @@ class JobRunner:
             vad_parameters=vad.parameters(self.s),
             hotwords=self._hotwords(recording),
             hallucination_guard=self.s.hallucination_guard,
+            repetition_penalty=self.s.repetition_penalty,
+            no_repeat_ngram_size=self.s.no_repeat_ngram_size,
             model=self.s.model,
             device=self.s.device,
             compute_type=self.s.compute_type,
@@ -194,7 +196,7 @@ class JobRunner:
         if log_cb:
             log_cb("Running speaker diarization (existing transcript kept)…")
         diar = diarization.Diarizer(self.s.hf_token, self.s.device)
-        turns = diar.diarize(
+        diarized = diar.diarize(
             audio_path,
             self.s.min_speakers,
             self.s.max_speakers,
@@ -202,9 +204,10 @@ class JobRunner:
             log_cb,
             should_cancel=should_cancel,
         )
-        mapping = Transcriber._stable_speaker_map(turns)
+        names = Transcriber._recognized_names(diarized, log_cb or (lambda _m: None))
+        mapping = Transcriber._stable_speaker_map(diarized.turns, names)
         for seg in result.segments:
-            raw = diarization.assign_speaker(seg.start, seg.end, turns)
+            raw = diarization.assign_speaker(seg.start, seg.end, diarized.turns)
             seg.speaker = mapping.get(raw) if raw else None
         result.speakers = list(dict.fromkeys(
             s.speaker for s in result.segments if s.speaker
@@ -389,6 +392,9 @@ class JobRunner:
             log_cb=log_cb,
             progress_cb=(lambda f: progress_cb(0.30 + f * 0.10)) if progress_cb else None,
             should_cancel=should_cancel,
+            # Per-channel mode reads one speaker per channel, so the denoiser
+            # must not hand back the downmix it produces by default.
+            preserve_channels=self.s.channel_mode == "per_channel",
         )
 
     def _source_audio(

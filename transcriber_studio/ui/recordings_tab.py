@@ -20,19 +20,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import config, history
+from .. import config, history, name_store
 from .. import resume as resume_store
 from ..audio_cache import attach_if_cached, audio_status_label
 from ..config import Settings
-from ..models import Recording
-from ..workers import ListWorker
+from ..models import Recording, Source
+from ..workers import ListWorker, RenameWorker
 from .theme import qcolor
 
 COLS = ["", "Name", "Date", "Duration", "Audio", "Status"]
 # ~680px total: the default width of the left pane. The Status column measures
 # its own longest label instead (fonts and DPI make a fixed number a guess).
 DEFAULT_COL_WIDTHS = [28, 240, 92, 78, 72, 170]
+NAME_COL = 1
 STATUS_COL = 5
+#: Tooltips are plain text; a literal is clearer here than an escape.
+LINE_BREAK = chr(10)
 MIN_COL_WIDTH = 24
 NAME_MIN_WIDTH = 120
 
@@ -46,6 +49,17 @@ STATE_ROLES = {
 }
 
 
+def _read_only(item: QTableWidgetItem) -> QTableWidgetItem:
+    """Take the edit flag off a cell.
+
+    Qt gives every item ItemIsEditable by default and relies on the view's edit
+    triggers to hold it back. The Name column needs those triggers, so every
+    other column has to say no for itself.
+    """
+    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+    return item
+
+
 class RecordingsTab(QWidget):
     selection_changed = Signal()
 
@@ -55,6 +69,7 @@ class RecordingsTab(QWidget):
         self.page = 1
         self._worker: ListWorker | None = None
         self._recordings: list[Recording] = []
+        self._rename_workers: dict[str, RenameWorker] = {}
 
         root = QVBoxLayout(self)
 
@@ -74,7 +89,12 @@ class RecordingsTab(QWidget):
         self.table.setHorizontalHeaderLabels(COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Only the Name cell is editable, and only by asking for it: a stray
+        # click in a list people mostly tick boxes in should not start an edit.
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         self._setup_columns()
         root.addWidget(self.table)
 
@@ -183,10 +203,19 @@ class RecordingsTab(QWidget):
     def _on_loaded(self, recs: list[Recording]):
         self.refresh_btn.setEnabled(True)
         self._recordings = [attach_if_cached(r) for r in recs]
+        # A name the user gave a recording outranks the one Plaud sends back —
+        # including when the push failed, which is exactly when the two differ.
+        name_store.load(force=True)
+        for rec in self._recordings:
+            rec.name = name_store.name_for(rec.id, rec.name)
         self.table.setRowCount(0)
         history.load(force=True)        # pick up anything finished since last look
+        # Populating writes into the Name column, and a write there is
+        # indistinguishable from someone typing in it.
+        self.table.blockSignals(True)
         for rec in self._recordings:
             self._add_row(rec)
+        self.table.blockSignals(False)
         cached = sum(1 for r in self._recordings if r.local_path)
         extra = f" · {cached} cached locally" if cached else ""
         self.status.setText(f"{len(recs)} recording(s){extra}.")
@@ -204,11 +233,114 @@ class RecordingsTab(QWidget):
         chk.setCheckState(Qt.CheckState.Unchecked)
         chk.setData(Qt.ItemDataRole.UserRole, rec)
         self.table.setItem(r, 0, chk)
-        self.table.setItem(r, 1, QTableWidgetItem(rec.display_name))
-        self.table.setItem(r, 2, QTableWidgetItem(rec.date))
-        self.table.setItem(r, 3, QTableWidgetItem(rec.duration))
-        self.table.setItem(r, 4, QTableWidgetItem(audio_status_label(rec)))
+        self.table.setItem(r, NAME_COL, self._name_item(rec))
+        self.table.setItem(r, 2, _read_only(QTableWidgetItem(rec.date)))
+        self.table.setItem(r, 3, _read_only(QTableWidgetItem(rec.duration)))
+        self.table.setItem(r, 4, _read_only(QTableWidgetItem(audio_status_label(rec))))
         self.table.setItem(r, 5, self._status_item(rec))
+
+    # ---- renaming -----------------------------------------------------
+    def _name_item(self, rec: Recording) -> QTableWidgetItem:
+        """The Name cell, editable, showing whether Plaud has the name yet."""
+        item = QTableWidgetItem(rec.display_name)
+        editable = rec.source == Source.PLAUD
+        flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+        if editable:
+            flags |= Qt.ItemFlag.ItemIsEditable
+        item.setFlags(flags)
+
+        local = name_store.get(rec.id)
+        if local is None:
+            item.setToolTip(
+                "Double-click to rename." if editable else rec.display_name
+            )
+            return item
+        if local.pushed:
+            item.setToolTip(
+                LINE_BREAK.join([
+                    "Renamed — Plaud has this name too.",
+                    f"Originally “{local.original or 'unknown'}”.",
+                ])
+            )
+        else:
+            # Said plainly rather than shown as an error: the rename worked,
+            # it just has not reached Plaud.
+            item.setForeground(qcolor("warn"))
+            item.setToolTip(
+                LINE_BREAK.join([
+                    "Renamed here, but not on Plaud yet.",
+                    f"Originally “{local.original or 'unknown'}”.",
+                    "Rename it again to retry the push.",
+                ])
+            )
+        return item
+
+    def _on_name_edited(self, row: int):
+        item = self.table.item(row, NAME_COL)
+        holder = self.table.item(row, 0)
+        if item is None or holder is None:
+            return
+        rec: Recording = holder.data(Qt.ItemDataRole.UserRole)
+        new_name = item.text().strip()
+        previous = rec.display_name
+        if not new_name:
+            # An empty name is a slip, not an instruction. Put it back.
+            self._set_name_cell(row, rec)
+            self.status.setText("A recording needs a name.")
+            return
+        if new_name == previous:
+            return
+
+        # Local first, always: the push is the part that can fail, and a rename
+        # the user can see is worth more than one that is merely in sync.
+        pushing = bool(self.s.plaud_rename_push and self.s.plaud_web_token.strip())
+        name_store.record(rec.id, new_name, original=previous, pushed=False)
+        rec.name = new_name
+        holder.setData(Qt.ItemDataRole.UserRole, rec)
+        self._set_name_cell(row, rec)
+
+        if not pushing:
+            self.status.setText(
+                f"Renamed “{new_name}” here. Turn on Settings → Plaud rename "
+                "to send names to Plaud as well."
+            )
+            return
+        self.status.setText(f"Renaming “{new_name}” on Plaud…")
+        worker = RenameWorker(self.s, rec.id, new_name, parent=self)
+        worker.done.connect(self._on_rename_pushed)
+        worker.error.connect(self._on_rename_failed)
+        # Held so the thread is not collected mid-flight; dropped when it ends.
+        self._rename_workers[rec.id] = worker
+        worker.finished.connect(lambda rid=rec.id: self._rename_workers.pop(rid, None))
+        worker.start()
+
+    def _set_name_cell(self, row: int, rec: Recording):
+        """Repaint one Name cell without the write looking like a fresh edit."""
+        self.table.blockSignals(True)
+        self.table.setItem(row, NAME_COL, self._name_item(rec))
+        self.table.blockSignals(False)
+
+    def _row_for(self, file_id: str) -> int | None:
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole).id == file_id:
+                return r
+        return None
+
+    def _on_rename_pushed(self, file_id: str):
+        row = self._row_for(file_id)
+        if row is not None:
+            self._set_name_cell(row, self.table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        self.status.setText("Renamed on Plaud.")
+
+    def _on_rename_failed(self, file_id: str, message: str):
+        row = self._row_for(file_id)
+        if row is not None:
+            self._set_name_cell(row, self.table.item(row, 0).data(Qt.ItemDataRole.UserRole))
+        # The name is kept either way; only the push failed, and saying which
+        # is the difference between a warning and an apparent data loss.
+        first_line = message.strip().splitlines()[0] if message.strip() else "unknown error"
+        self.status.setText(f"Renamed here, but Plaud refused: {first_line}")
 
     # ---- status column ------------------------------------------------
     @staticmethod
@@ -233,7 +365,7 @@ class RecordingsTab(QWidget):
 
     def _status_item(self, rec: Recording) -> QTableWidgetItem:
         text, tip, color = self._status_for(rec)
-        item = QTableWidgetItem(text)
+        item = _read_only(QTableWidgetItem(text))
         item.setToolTip(tip)
         if color is not None:
             item.setForeground(color)
@@ -252,6 +384,8 @@ class RecordingsTab(QWidget):
     def _on_cell_changed(self, row: int, col: int):
         if col == 0:
             self.selection_changed.emit()
+        elif col == NAME_COL:
+            self._on_name_edited(row)
 
     def _set_all(self, checked: bool):
         self.table.blockSignals(True)

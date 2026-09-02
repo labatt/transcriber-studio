@@ -246,3 +246,68 @@ class ListWorker(QThread):
             self.done.emit(recs)
         except Exception as e:
             self.error.emit(str(e))
+
+
+class RenameWorker(QThread):
+    """Pushes one renamed recording to Plaud, off the UI thread.
+
+    The local rename is already committed by the time this starts. This only
+    decides whether the name also reaches Plaud, so a failure here is reported
+    as a name that did not sync — never as a rename that did not happen.
+    """
+
+    done = Signal(str)          # file_id — Plaud accepted the name
+    error = Signal(str, str)    # file_id, message
+
+    def __init__(self, settings: Settings, file_id: str, name: str, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.file_id = file_id
+        self.name = name
+
+    def run(self):
+        from . import name_store, plaud_web
+
+        try:
+            client = plaud_web.PlaudWebClient(
+                self.settings.plaud_web_token,
+                plaud_web.API_HOSTS.get(
+                    self.settings.plaud_web_region, plaud_web.DEFAULT_HOST
+                ),
+            )
+            client.rename(self.file_id, self.name)
+            name_store.mark_pushed(self.file_id)
+            self.done.emit(self.file_id)
+        except Exception as e:
+            self.error.emit(self.file_id, str(e))
+
+
+class TokenCheckWorker(QThread):
+    """Proves a pasted Plaud web token works, without changing anything."""
+
+    done = Signal(str)      # a short description of what was accepted
+    error = Signal(str)
+
+    def __init__(self, token: str, region: str, parent=None):
+        super().__init__(parent)
+        self.token = token
+        self.region = region
+
+    def run(self):
+        from . import plaud_web
+
+        try:
+            info = plaud_web.validate_token(self.token)
+            client = plaud_web.PlaudWebClient(
+                self.token, plaud_web.API_HOSTS.get(self.region, plaud_web.DEFAULT_HOST)
+            )
+            client.check()
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        days = info.days_left
+        self.done.emit(
+            f"Token accepted — about {days} days left."
+            if days is not None
+            else "Token accepted."
+        )

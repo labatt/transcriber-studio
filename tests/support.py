@@ -8,7 +8,14 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from transcriber_studio import denoise, diarization, glossary_store, history
+from transcriber_studio import (
+    denoise,
+    diarization,
+    glossary_store,
+    history,
+    name_store,
+    voiceprints,
+)
 from transcriber_studio import resume as resume_store
 
 
@@ -92,3 +99,29 @@ def isolated_diarization_cache():
             yield diarization.CACHE_DIR
         finally:
             diarization.CACHE_DIR = original
+
+
+@contextmanager
+def isolated_name_store():
+    """Keep renamed-recording names out of the real app directory."""
+    original = name_store.STORE_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        name_store.STORE_PATH = Path(tmp) / "plaud_names.json"
+        name_store.load(force=True)      # drop the previous test's names
+        try:
+            yield name_store.STORE_PATH
+        finally:
+            name_store.STORE_PATH = original
+            name_store.load(force=True)
+
+
+@contextmanager
+def isolated_voiceprints():
+    """Keep enrolled voices out of the real app directory during tests."""
+    original = voiceprints.PROFILE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        voiceprints.PROFILE_DIR = Path(tmp) / "voiceprints"
+        try:
+            yield voiceprints.PROFILE_DIR
+        finally:
+            voiceprints.PROFILE_DIR = original

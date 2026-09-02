@@ -250,6 +250,36 @@ def decode_key(recording: Recording, opts: Any) -> str:
     )
 
 
+#: Everything a Segment carries. Named here so a restored run rebuilds the
+#: whole segment rather than the parts that existed when the file was written —
+#: and so an older checkpoint, missing the newer keys, still loads.
+_SEGMENT_KEYS = (
+    "start", "end", "text", "speaker", "channel",
+    "avg_logprob", "no_speech_prob", "compression_ratio",
+)
+
+
+def _segment_to_dict(segment: Segment) -> dict[str, Any]:
+    data: dict[str, Any] = {"start": segment.start, "end": segment.end, "text": segment.text}
+    # Optional fields are written only when set, so a checkpoint stays readable
+    # and does not fill with nulls for engines that report no confidence.
+    for key in _SEGMENT_KEYS[3:]:
+        value = getattr(segment, key)
+        if value is not None:
+            data[key] = value
+    return data
+
+
+def _segment_from_dict(data: dict[str, Any]) -> Segment:
+    """Tolerant of both older checkpoints and newer ones.
+
+    Unknown keys are dropped rather than raising: a checkpoint written by a
+    later version of the app should degrade to a usable transcript, not to a
+    crash on resume.
+    """
+    return Segment(**{k: v for k, v in data.items() if k in _SEGMENT_KEYS})
+
+
 def decode_to_dict(
     segments: list[Segment], language: str, words: list[dict] | None = None
 ) -> dict[str, Any]:
@@ -261,14 +291,14 @@ def decode_to_dict(
     """
     return {
         "language": language,
-        "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in segments],
+        "segments": [_segment_to_dict(s) for s in segments],
         "words": words or [],
     }
 
 
 def decode_from_dict(data: dict[str, Any]) -> tuple[list[Segment], str, list[dict]]:
     return (
-        [Segment(**s) for s in data.get("segments", [])],
+        [_segment_from_dict(s) for s in data.get("segments", [])],
         data.get("language", ""),
         list(data.get("words") or []),
     )
@@ -279,23 +309,14 @@ def transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
         "language": transcript.language,
         "model": transcript.model,
         "speakers": list(transcript.speakers),
-        "segments": [
-            {
-                "start": s.start,
-                "end": s.end,
-                "text": s.text,
-                "speaker": s.speaker,
-                "channel": s.channel,
-            }
-            for s in transcript.segments
-        ],
+        "segments": [_segment_to_dict(s) for s in transcript.segments],
     }
 
 
 def transcript_from_dict(recording: Recording, data: dict[str, Any]) -> TranscriptResult:
     return TranscriptResult(
         recording=recording,
-        segments=[Segment(**s) for s in data.get("segments", [])],
+        segments=[_segment_from_dict(s) for s in data.get("segments", [])],
         language=data.get("language", ""),
         model=data.get("model", ""),
         speakers=list(data.get("speakers") or []),

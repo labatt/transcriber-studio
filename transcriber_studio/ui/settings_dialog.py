@@ -26,7 +26,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import ai_providers, denoise, diarization, stt_elevenlabs, stt_gemini, whisper_models
+from .. import (
+    ai_providers,
+    denoise,
+    diarization,
+    plaud_web,
+    stt_elevenlabs,
+    stt_gemini,
+    whisper_models,
+)
 from ..config import Settings
 from ..hardware import (
     CUDA_TORCH_INSTALL_CMD,
@@ -36,6 +44,10 @@ from ..hardware import (
     torch_cuda_available,
 )
 from .theme import SheetDialog, WrappedNote, muted
+
+#: Multi-line note text is joined rather than escaped; it reads better in
+#: source and it is what the label actually renders.
+LINE_BREAK = chr(10)
 
 LANGS = ["auto", "en", "es", "fr", "de", "it", "pt", "nl", "ja", "zh", "ko", "ru", "ar", "hi"]
 
@@ -353,6 +365,8 @@ class SettingsDialog(SheetDialog):
         pf.addRow(plaud_note)
         plaud_tab.addWidget(plaud)
 
+        plaud_tab.addWidget(self._rename_group(settings))
+
         # --- AI provider keys ---
         ai = QGroupBox("AI providers (for AI Cleanup — keys stored locally only)")
         af = QFormLayout(ai)
@@ -486,6 +500,46 @@ class SettingsDialog(SheetDialog):
             "audio; costs a little continuity on clean audio."
         )
         bf.addRow(self.hallucination_guard)
+
+        self.repetition_penalty = QDoubleSpinBox()
+        self.repetition_penalty.setRange(1.0, 2.0)
+        self.repetition_penalty.setSingleStep(0.05)
+        self.repetition_penalty.setDecimals(2)
+        self.repetition_penalty.setValue(settings.repetition_penalty)
+        self.repetition_penalty.setSpecialValueText("off")
+        self.repetition_penalty.setToolTip(
+            "Discourages the decoder from reusing words it has just produced."
+            + LINE_BREAK * 2
+            + "The guard above stops a hallucination carrying between windows; "
+            "nothing stops one repeating inside a window, and this does. Reach "
+            "for it on a recording that came back with a phrase looping — 1.05 "
+            "to 1.15 is usually enough. Higher values start deleting repetition "
+            "that really happened."
+        )
+        bf.addRow("Repetition penalty:", self.repetition_penalty)
+
+        self.no_repeat_ngram = QSpinBox()
+        self.no_repeat_ngram.setRange(0, 10)
+        self.no_repeat_ngram.setValue(settings.no_repeat_ngram_size)
+        self.no_repeat_ngram.setSpecialValueText("off")
+        self.no_repeat_ngram.setToolTip(
+            "Forbids any sequence of this many words occurring twice in one "
+            "window."
+            + LINE_BREAK * 2
+            + "Blunter than the penalty and easier to regret: people repeat "
+            "themselves, and this cannot tell a decode loop from someone making "
+            "the same point twice. A last resort, not a default."
+        )
+        bf.addRow("Block repeated n-grams:", self.no_repeat_ngram)
+
+        repeat_note = QLabel(
+            "Both are off unless you turn them on. Whisper already discards its "
+            "worst loops; these are for the ones that get through."
+        )
+        repeat_note.setWordWrap(True)
+        repeat_note.setStyleSheet("color: gray;")
+        bf.addRow(repeat_note)
+
         audio.addWidget(bias)
         audio.addStretch()
 
@@ -618,6 +672,99 @@ class SettingsDialog(SheetDialog):
         self._update_denoise_status()
         self._update_preview()
         self.select_tab(tab)
+
+    def _rename_group(self, settings) -> QGroupBox:
+        """Pushing a renamed recording back to Plaud.
+
+        Separate from the Plaud cloud box above on purpose: everything there
+        goes through the official CLI, and this does not. The official API is
+        read-only, so renaming has to use the web app's own API, and the user
+        should be able to see that is what they are turning on.
+        """
+        box = QGroupBox("Plaud rename (unofficial)")
+        form = QFormLayout(box)
+
+        self.plaud_rename_push = QCheckBox("Send renamed recordings to Plaud")
+        self.plaud_rename_push.setChecked(settings.plaud_rename_push)
+        self.plaud_rename_push.setToolTip(
+            "Off: renaming changes the name in this app only."
+        )
+        form.addRow(self.plaud_rename_push)
+
+        self.plaud_web_token = QLineEdit(settings.plaud_web_token)
+        self.plaud_web_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.plaud_web_token.setPlaceholderText("paste the pld_ut cookie")
+        form.addRow("Web token:", self.plaud_web_token)
+
+        self.plaud_web_region = QComboBox()
+        for key, label in (
+            ("global", "Global (api.plaud.ai)"),
+            ("eu", "Europe (api-euc1.plaud.ai)"),
+            ("apac", "Asia Pacific (api-apse1.plaud.ai)"),
+        ):
+            self.plaud_web_region.addItem(label, key)
+        index = self.plaud_web_region.findData(settings.plaud_web_region or "global")
+        self.plaud_web_region.setCurrentIndex(max(0, index))
+        self.plaud_web_region.setToolTip(
+            "An account lives on one of these. The wrong one is refused, and "
+            "the message says which is right."
+        )
+        form.addRow("Server:", self.plaud_web_region)
+
+        check_row = QHBoxLayout()
+        check_row.setContentsMargins(0, 0, 0, 0)
+        self.plaud_token_check = QPushButton("Check token")
+        self.plaud_token_check.setAutoDefault(False)
+        self.plaud_token_check.clicked.connect(self._check_plaud_token)
+        check_row.addWidget(self.plaud_token_check)
+        check_row.addStretch()
+        form.addRow(self._wrap(check_row))
+
+        self.plaud_token_status = QLabel("")
+        self.plaud_token_status.setWordWrap(True)
+        self.plaud_token_status.setStyleSheet("color: gray;")
+        form.addRow(self.plaud_token_status)
+
+        note = QLabel(
+            LINE_BREAK.join([
+                "Plaud's official API cannot rename anything, so this uses the "
+                "same API the Plaud website uses. It is not documented, and it "
+                "may stop working without warning — renaming in this app "
+                "keeps working either way.",
+                "",
+                "To get the token: sign in at web.plaud.ai, then open "
+                "DevTools → Application → Cookies → "
+                "https://web.plaud.ai and copy the value of pld_ut. It lasts "
+                "about a year.",
+                "",
+                "Do not copy the Authorization header from the network tab: "
+                "that is a different, one-day token, and it is refused here.",
+            ])
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        form.addRow(note)
+        self._token_worker = None
+        return box
+
+    def _check_plaud_token(self):
+        from ..workers import TokenCheckWorker
+
+        if self._token_worker is not None and self._token_worker.isRunning():
+            return
+        self.plaud_token_check.setEnabled(False)
+        self.plaud_token_status.setText("Checking…")
+        self._token_worker = TokenCheckWorker(
+            self.plaud_web_token.text(),
+            self.plaud_web_region.currentData(),
+            self,
+        )
+        self._token_worker.done.connect(self.plaud_token_status.setText)
+        self._token_worker.error.connect(self.plaud_token_status.setText)
+        self._token_worker.finished.connect(
+            lambda: self.plaud_token_check.setEnabled(True)
+        )
+        self._token_worker.start()
 
     def select_tab(self, title: str) -> bool:
         """Open on a named tab. Unknown or empty names leave it on the first."""
@@ -866,6 +1013,9 @@ class SettingsDialog(SheetDialog):
         self.s.diarization_enabled = self.diar_on.isChecked()
         self.s.hf_token = self.hf.text().strip()
         self.s.plaud_page_size = self.plaud_page_size.value()
+        self.s.plaud_rename_push = self.plaud_rename_push.isChecked()
+        self.s.plaud_web_token = plaud_web.normalize_token(self.plaud_web_token.text())
+        self.s.plaud_web_region = self.plaud_web_region.currentData() or "global"
         self.s.vad_threshold = self.vad_threshold.value()
         self.s.vad_min_silence_ms = self.vad_min_silence.value()
         self.s.vad_speech_pad_ms = self.vad_pad.value()
@@ -874,6 +1024,8 @@ class SettingsDialog(SheetDialog):
         self.s.bias_extra_terms = self.bias_terms.toPlainText().strip()
         self.s.bias_max_chars = self.bias_budget.value()
         self.s.hallucination_guard = self.hallucination_guard.isChecked()
+        self.s.repetition_penalty = self.repetition_penalty.value()
+        self.s.no_repeat_ngram_size = self.no_repeat_ngram.value()
         self.s.channel_mode = self.channel_mode.currentData() or "downmix"
         self.s.channel_names = self.channel_names.text().strip()
         self.s.line_mode = self.line_mode.currentData() or "segment"

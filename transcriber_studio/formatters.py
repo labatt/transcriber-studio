@@ -204,15 +204,30 @@ def _render_json(result: TranscriptResult, opts) -> str:
         "model": result.model,
         "language": result.language,
         "speakers": result.speakers,
-        "segments": [
-            {
-                "start": round(s.start, 3),
-                "end": round(s.end, 3),
-                "speaker": s.speaker,
-                "channel": s.channel,
-                "text": s.text.strip(),
-            }
-            for s in result.segments
-        ],
+        "segments": [_json_segment(s) for s in result.segments],
     }
     return json.dumps(data, indent=2, ensure_ascii=False)
+
+
+def _json_segment(segment: Segment) -> dict:
+    """One segment, with the decoder's own opinion of it where there is one.
+
+    The confidence keys are omitted rather than nulled when the engine reported
+    nothing, so a consumer can tell "the decoder was unsure" apart from "this
+    engine does not say".
+    """
+    data = {
+        "start": round(segment.start, 3),
+        "end": round(segment.end, 3),
+        "speaker": segment.speaker,
+        "channel": segment.channel,
+        "text": segment.text.strip(),
+    }
+    if segment.confidence is not None:
+        data["confidence"] = round(segment.confidence, 4)
+        data["avg_logprob"] = round(segment.avg_logprob, 4)
+    if segment.no_speech_prob is not None:
+        data["no_speech_prob"] = round(segment.no_speech_prob, 4)
+    if segment.compression_ratio is not None:
+        data["compression_ratio"] = round(segment.compression_ratio, 4)
+    return data

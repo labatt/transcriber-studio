@@ -58,6 +58,22 @@ MODELS: dict[str, ModelInfo] = {
         "large-v3", "1550M", "~10 GB", "baseline", "Best",
         "The default with a GPU: best accuracy on names, jargon and crosstalk.",
     ),
+    "large-v3-turbo": ModelInfo(
+        "large-v3-turbo", "809M", "~6 GB", "~6× faster", "Very good",
+        "Long recordings where large-v3 is more wait than the accuracy is worth. "
+        "Same encoder as large-v3 with a much shallower decoder, so it keeps the "
+        "multilingual reach and gives up a little accuracy for a lot of speed.",
+        label="large-v3-turbo",
+        caveats=(
+            "Four decoder layers instead of thirty-two. That is where the speed "
+            "comes from, and also where hotwords act — so glossary and vocabulary "
+            "bias have less depth to work with than on large-v3. Worth checking "
+            "against your own names and jargon before trusting it on them.",
+            "No translation task: it transcribes in the language spoken.",
+            "Measurably weaker on a few languages, Thai and Cantonese especially.",
+            "Downloaded from HuggingFace on first use (~1.6 GB).",
+        ),
+    ),
     CRISPER: ModelInfo(
         CRISPER, "1550M", "~10 GB", "Much slower", "Best (verbatim)",
         "Hard audio where you want every word as spoken: it keeps the fillers, "
@@ -80,7 +96,10 @@ MODELS: dict[str, ModelInfo] = {
     ),
 }
 
-ORDER = ["tiny", "base", "small", "medium", "large-v2", "large-v3", CRISPER]
+ORDER = [
+    "tiny", "base", "small", "medium",
+    "large-v2", "large-v3", "large-v3-turbo", CRISPER,
+]
 
 GPU_RECOMMENDED = "large-v3"
 CPU_RECOMMENDED = "small"
@@ -113,6 +132,8 @@ def describe(model_id: str, has_gpu: bool) -> str:
     else:
         lines.append(f"On this machine ({where}) the usual pick is {pick}.")
     if not has_gpu and model_id in ("large-v2", "large-v3", "medium", CRISPER):
+        # large-v3-turbo is deliberately not in that list: a third the decoder
+        # depth is exactly what makes it survivable on a CPU.
         lines.append(
             "Without a GPU this runs several times slower than the recording itself — "
             "an hour of audio can take hours."

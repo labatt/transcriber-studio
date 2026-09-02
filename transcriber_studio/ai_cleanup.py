@@ -313,6 +313,20 @@ def input_char_ceiling(provider: str, model: str) -> int:
         if any(x in m for x in ("128k", "200k", "1m")):
             return 500_000
         return 120_000
+    if provider in ("ollama_cloud", "ollama_local"):
+        # Ollama's window is whatever num_ctx we ask for, so the real limit is
+        # the largest one worth allocating on the user's own machine, minus the
+        # answer it has to fit alongside the prompt. Anything past this is not
+        # rejected, it is silently dropped — so the batch has to stay inside it.
+        input_tokens = (
+            ai_providers.OLLAMA_MAX_NUM_CTX
+            - output_token_ceiling(provider, model)
+            - ai_providers.OLLAMA_CTX_HEADROOM_TOKENS
+        )
+        # chars-per-token is an average, and transcript JSON tokenizes worse
+        # than prose. Undershoot deliberately: the penalty for overshooting is
+        # silent truncation, and the penalty for undershooting is one more batch.
+        return int(input_tokens * ai_providers.OLLAMA_CHARS_PER_TOKEN * OUTPUT_SAFETY)
     return 60_000
 
 

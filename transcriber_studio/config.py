@@ -148,6 +148,15 @@ class Settings:
     # --- misc ---
     plaud_page_size: int = 50
 
+    # --- renaming Plaud recordings (see transcriber_studio.plaud_web) ---
+    # Off by default and deliberately opt-in: pushing a name to Plaud uses the
+    # web app's API rather than the official one, because the official one
+    # cannot rename. Renaming still works with this off — the name just stays
+    # in this app.
+    plaud_rename_push: bool = False
+    plaud_web_token: str = ""       # the pld_ut cookie, stored locally only
+    plaud_web_region: str = "global"    # global | eu | apac
+
     # --- UI state ---
     # False until the first-run wizard has been through once; the Setup button
     # re-runs it on demand.
@@ -217,6 +226,14 @@ class Settings:
     # Stops a hallucinated passage seeding the next window, and drops segments
     # the decoder produced over long silences.
     hallucination_guard: bool = True
+
+    # Repetition control. Both are the decoder's own defaults, which is to say
+    # off: neither the guard above nor the VAD does anything about a decode
+    # loop inside a single window, and both of these can degrade an ordinary
+    # transcript, so they are levers to reach for on a recording that needs
+    # them rather than protection to leave running.
+    repetition_penalty: float = 1.0     # 1.0 = off
+    no_repeat_ngram_size: int = 0       # 0 = off
 
     # --- prompt caching (LLM providers that support it) ---
     prompt_cache_enabled: bool = True
