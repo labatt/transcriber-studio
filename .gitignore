@@ -19,8 +19,13 @@ htmlcov/
 # Editors / assistants
 .idea/
 .vscode/
-.claude/
 *.swp
+
+# Assistant config is local, except the committed run-* skills and their
+# drivers, which are shared tooling for building and driving the app.
+.claude/*
+!.claude/skills/
+.claude/skills/*/shots/
 
 # OS
 .DS_Store
