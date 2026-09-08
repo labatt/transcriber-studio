@@ -34,6 +34,7 @@ from .. import (
     plaud_web,
     stt_elevenlabs,
     stt_gemini,
+    stt_mai,
     whisper_models,
 )
 from ..config import Settings
@@ -205,6 +206,7 @@ class SettingsDialog(SheetDialog):
         gem_note.setStyleSheet("color: gray;")
         gemf.addRow(gem_note)
         engines.addWidget(gem)
+        engines.addWidget(self._mai_group(settings))
 
         # --- Whisper engine ---
         eng = QGroupBox("Whisper engine (local — faster-whisper)")
@@ -674,6 +676,120 @@ class SettingsDialog(SheetDialog):
         self._update_preview()
         self.select_tab(tab)
 
+    def _mai_group(self, settings) -> QGroupBox:
+        """Microsoft MAI-Transcribe, through Azure Speech.
+
+        Its own key rather than a shared one: this is an Azure Speech resource,
+        unrelated to any of the LLM provider accounts below.
+        """
+        box = QGroupBox("MAI-Transcribe (cloud engine — Azure Speech)")
+        form = QFormLayout(box)
+
+        self.mai_key = self._key_field(settings.mai_api_key)
+        form.addRow("Speech key:", self.mai_key)
+
+        self.mai_region = QComboBox()
+        for region in stt_mai.REGIONS:
+            self.mai_region.addItem(region, region)
+        index = self.mai_region.findData(settings.mai_region or stt_mai.DEFAULT_REGION)
+        self.mai_region.setCurrentIndex(max(0, index))
+        self.mai_region.setToolTip(
+            "Only these six Azure regions host the MAI models. A Speech resource "
+            "in any other region accepts the key and then reports the model as "
+            "missing, which is a confusing way to find out."
+        )
+        form.addRow("Region:", self.mai_region)
+
+        self.mai_model = QComboBox()
+        self.mai_model.addItems(stt_mai.MODELS)
+        self.mai_model.setCurrentText(settings.mai_model or stt_mai.DEFAULT_MODEL)
+        form.addRow("Model:", self.mai_model)
+
+        self.mai_style = QComboBox()
+        self.mai_style.addItem("Verbatim — every filler and false start", stt_mai.STYLE_VERBATIM)
+        self.mai_style.addItem("Clean — fillers removed, auto-formatted", stt_mai.STYLE_CLEAN)
+        index = self.mai_style.findData(settings.mai_style or stt_mai.STYLE_VERBATIM)
+        self.mai_style.setCurrentIndex(max(0, index))
+        self.mai_style.setToolTip(
+            "Verbatim by default, for the same reason CrisperWhisper is offered "
+            "locally: tidying belongs in AI Cleanup, after the words are on the "
+            "page and where you can see what it changed. Clean is the model "
+            "doing it for you, invisibly."
+        )
+        form.addRow("Transcript style:", self.mai_style)
+
+        self.mai_speakers = QComboBox()
+        self.mai_speakers.addItem(
+            "Detect speakers here (pyannote) — any length, voiceprints work", "local"
+        )
+        self.mai_speakers.addItem(
+            "Let MAI detect speakers — short clips only; fails by 15 minutes", "mai"
+        )
+        index = self.mai_speakers.findData(settings.mai_speakers or "local")
+        self.mai_speakers.setCurrentIndex(max(0, index))
+        self.mai_speakers.setToolTip(
+            "MAI transcribes a 73-minute recording in one request without "
+            "trouble. Its own speaker detection does not: measured on real "
+            "recordings, it fails by 15 minutes with an error that "
+            "looks like a network timeout. Detecting speakers locally sidesteps "
+            "that, and returns the voice data enrolled voiceprints need."
+        )
+        form.addRow("Speakers:", self.mai_speakers)
+
+        self.mai_phrases = QCheckBox("Send glossary terms as recognition hints")
+        self.mai_phrases.setChecked(settings.mai_send_phrases)
+        self.mai_phrases.setToolTip(
+            "Passes the same vocabulary the glossary builds for Whisper's "
+            "hotwords to Azure's phrase list, so a name learned on one recording "
+            "helps the next one here too."
+        )
+        form.addRow(self.mai_phrases)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.mai_test = QPushButton("Test key and region")
+        self.mai_test.setAutoDefault(False)
+        self.mai_test.clicked.connect(self._test_mai)
+        row.addWidget(self.mai_test)
+        row.addStretch()
+        form.addRow(self._wrap(row))
+
+        self.mai_status = QLabel("")
+        self.mai_status.setWordWrap(True)
+        self.mai_status.setStyleSheet("color: gray;")
+        form.addRow(self.mai_status)
+
+        form.addRow(WrappedNote(
+            "Choose this engine in the Options panel. With speakers detected here, "
+            "MAI supplies the words and pyannote the speakers, so the Speakers "
+            "settings apply and enrolled voiceprints can name people. With MAI "
+            "detecting speakers, none of that applies and speakers arrive as "
+            "Speaker 1, 2, 3."
+            + LINE_BREAK * 2 +
+            "Needs an Azure subscription and a Foundry resource for Speech, created "
+            "in one of the regions above; the key is on the resource's Keys and "
+            "Endpoint page. Public preview, so no service-level agreement. Audio is "
+            "uploaded to Azure and billed to your Azure account — 300 MB and 5 hours "
+            "per recording."
+        ))
+        self._mai_worker = None
+        return box
+
+    def _test_mai(self):
+        from ..workers import MaiTestWorker
+
+        if self._mai_worker is not None and self._mai_worker.isRunning():
+            return
+        self.mai_test.setEnabled(False)
+        self.mai_status.setText("Checking…")
+        self._mai_worker = MaiTestWorker(
+            self.mai_key.text().strip(), self.mai_region.currentData(), self
+        )
+        self._mai_worker.ok.connect(self.mai_status.setText)
+        self._mai_worker.failed.connect(self.mai_status.setText)
+        self._mai_worker.finished.connect(lambda: self.mai_test.setEnabled(True))
+        self._mai_worker.start()
+
     def _rename_group(self, settings) -> QGroupBox:
         """Pushing a renamed recording back to Plaud.
 
@@ -1020,6 +1136,12 @@ class SettingsDialog(SheetDialog):
         self.s.elevenlabs_tag_audio_events = self.el_audio_events.isChecked()
         self.s.gemini_model = self.gemini_model.currentText()
         self.s.gemini_mode = self.gemini_mode.currentData() or stt_gemini.DEFAULT_MODE
+        self.s.mai_api_key = self.mai_key.text().strip()
+        self.s.mai_region = self.mai_region.currentData() or stt_mai.DEFAULT_REGION
+        self.s.mai_model = self.mai_model.currentText() or stt_mai.DEFAULT_MODEL
+        self.s.mai_style = self.mai_style.currentData() or stt_mai.STYLE_VERBATIM
+        self.s.mai_send_phrases = self.mai_phrases.isChecked()
+        self.s.mai_speakers = self.mai_speakers.currentData() or "local"
         self.s.model = self.model.currentData() or self.s.model
         self.s.device = self.device.currentText()
         self.s.compute_type = self.compute.currentText()

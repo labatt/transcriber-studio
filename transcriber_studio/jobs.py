@@ -38,18 +38,26 @@ class JobResult:
 
 
 def copy_transcript(transcript: TranscriptResult) -> TranscriptResult:
-    """Deep copy of a transcript (segments + speaker labels)."""
-    from .models import Segment
+    """Deep copy of a transcript.
+
+    Copies by replacement rather than by listing fields: this used to name the
+    five fields a Segment had when it was written, so every field added since —
+    the decoder's confidence, the speaker voice vectors — was silently dropped
+    on the way through, and a restored copy quietly had less in it than the
+    original.
+    """
+    import dataclasses
 
     return TranscriptResult(
         recording=transcript.recording,
-        segments=[
-            Segment(s.start, s.end, s.text, s.speaker, s.channel)
-            for s in transcript.segments
-        ],
+        segments=[dataclasses.replace(s) for s in transcript.segments],
         language=transcript.language,
         model=transcript.model,
         speakers=list(transcript.speakers),
+        speaker_embeddings={
+            k: list(v) for k, v in transcript.speaker_embeddings.items()
+        },
+        speaker_seconds=dict(transcript.speaker_seconds),
     )
 
 
@@ -106,6 +114,9 @@ class JobRunner:
             hallucination_guard=self.s.hallucination_guard,
             repetition_penalty=self.s.repetition_penalty,
             no_repeat_ngram_size=self.s.no_repeat_ngram_size,
+            voiceprint_threshold=self.s.voiceprint_threshold,
+            voiceprint_margin=self.s.voiceprint_margin,
+            voiceprint_min_speech_s=self.s.voiceprint_min_speech_s,
             model=self.s.model,
             device=self.s.device,
             compute_type=self.s.compute_type,
@@ -122,6 +133,12 @@ class JobRunner:
             gemini_api_key=self.s.ai_key_google,
             gemini_model=self.s.gemini_model,
             gemini_mode=self.s.gemini_mode,
+            mai_api_key=self.s.mai_api_key,
+            mai_region=self.s.mai_region,
+            mai_model=self.s.mai_model,
+            mai_style=self.s.mai_style,
+            mai_send_phrases=self.s.mai_send_phrases,
+            mai_speakers=self.s.mai_speakers,
             tag_audio_events=self.s.elevenlabs_tag_audio_events,
         )
 
@@ -204,7 +221,13 @@ class JobRunner:
             log_cb,
             should_cancel=should_cancel,
         )
-        names = Transcriber._recognized_names(diarized, log_cb or (lambda _m: None))
+        names = Transcriber._recognized_names(
+            diarized, log_cb or (lambda _m: None),
+            threshold=self.s.voiceprint_threshold,
+            margin=self.s.voiceprint_margin,
+            min_speech=self.s.voiceprint_min_speech_s,
+            source=result.recording.display_name,
+        )
         mapping = Transcriber._stable_speaker_map(diarized.turns, names)
         for seg in result.segments:
             raw = diarization.assign_speaker(seg.start, seg.end, diarized.turns)
@@ -212,6 +235,11 @@ class JobRunner:
         result.speakers = list(dict.fromkeys(
             s.speaker for s in result.segments if s.speaker
         ))
+        # Without this the rename dialog has labels but nothing to enrol from,
+        # so "Remember this voice" sits greyed out after a Detect speakers run.
+        result.speaker_embeddings, result.speaker_seconds = (
+            Transcriber._speaker_voice_data(diarized, names)
+        )
         return result
 
     def apply_ai_cleanup(

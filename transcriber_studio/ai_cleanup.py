@@ -290,7 +290,11 @@ def output_token_ceiling(provider: str, model: str) -> int:
             return 64_000
         return 8_192
     if provider == "google":
-        return 8_192
+        # Gemini's real ceiling is far higher (gemini-flash-latest reports
+        # 65,536), but this number sizes the batches, and a batch is only worth
+        # enlarging if the answer reliably fits. Raised from 8,192 to match what
+        # the profile actually requests, so the two stop disagreeing.
+        return 16_384
     if provider in ("openai", "openrouter", "grok"):
         if any(x in m for x in ("o1", "o3", "o4")):
             return 32_768
@@ -649,6 +653,10 @@ def _should_split_chunk(error: str) -> bool:
             "missing 'segments'",
             "stop_reason=max_tokens",
             "finish_reason=length",
+            # Gemini's spelling of the same thing. Without it a genuinely
+            # oversized batch is never split, because the message that says so
+            # does not match anything above.
+            "finish_reason=max_tokens",
         )
     )
 

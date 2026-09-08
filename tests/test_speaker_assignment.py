@@ -85,3 +85,61 @@ def test_speaker_numbers_follow_who_spoke_first():
     )
     assert [s.speaker for s in segments] == ["Speaker 1", "Speaker 2"]
     assert speakers == ["Speaker 1", "Speaker 2"]
+
+
+# ---- words in a pause between turns ----------------------------------------
+def test_a_word_in_a_pause_between_turns_takes_the_nearest_speaker():
+    """Diarization turns are cut at speech. A word timed inside the breath
+    between two clauses overlaps no turn; live, that left a one-speaker clip as
+    five segments, two of them attributed to nobody."""
+    from transcriber_studio import diarization
+    from transcriber_studio.diarization import SpeakerTurn
+
+    turns = [SpeakerTurn(0.0, 1.0, "SPEAKER_00"), SpeakerTurn(1.4, 3.0, "SPEAKER_00")]
+    assert diarization.assign_speaker(1.1, 1.3, turns) is None
+    assert diarization.nearest_speaker(1.1, 1.3, turns) == "SPEAKER_00"
+
+
+def test_the_nearest_turn_wins_when_two_speakers_flank_the_gap():
+    from transcriber_studio import diarization
+    from transcriber_studio.diarization import SpeakerTurn
+
+    turns = [SpeakerTurn(0.0, 1.0, "SPEAKER_00"), SpeakerTurn(2.0, 3.0, "SPEAKER_01")]
+    assert diarization.nearest_speaker(1.05, 1.2, turns) == "SPEAKER_00"
+    assert diarization.nearest_speaker(1.8, 1.95, turns) == "SPEAKER_01"
+
+
+def test_a_word_far_from_any_turn_still_gets_no_speaker():
+    """A long silence is a long silence; nobody said the word that pyannote
+    heard nothing around."""
+    from transcriber_studio import diarization
+    from transcriber_studio.diarization import SpeakerTurn
+
+    turns = [SpeakerTurn(0.0, 1.0, "SPEAKER_00")]
+    assert diarization.nearest_speaker(10.0, 10.5, turns) is None
+
+
+def test_a_single_speaker_clip_stays_one_speaker_through_its_pauses():
+    """The live case: three MAI segments over one pyannote speaker with pauses
+    between turns must not fragment into speakerless pieces."""
+    from transcriber_studio.diarization import DiarizationResult, SpeakerTurn
+    from transcriber_studio.models import Segment
+    from transcriber_studio.transcriber import Transcriber
+
+    # Spacing entries interleaved, as the cloud engines actually send them.
+    words = [
+        {"type": "word", "text": "First", "start": 0.4, "end": 0.9},
+        {"type": "spacing", "text": " "},
+        {"type": "word", "text": "book", "start": 1.0, "end": 1.2},   # in a pause
+        {"type": "spacing", "text": " "},
+        {"type": "word", "text": "for", "start": 1.5, "end": 1.7},
+    ]
+    diarized = DiarizationResult(turns=[
+        SpeakerTurn(0.3, 0.95, "SPEAKER_00"), SpeakerTurn(1.4, 2.0, "SPEAKER_00"),
+    ])
+    segments, speakers = Transcriber.__new__(Transcriber)._apply_speakers(
+        [Segment(0.4, 1.7, "First book for")], words, diarized, lambda _m: None, {}
+    )
+    assert speakers == ["Speaker 1"]
+    assert [s.speaker for s in segments] == ["Speaker 1"]
+    assert segments[0].text == "First book for"

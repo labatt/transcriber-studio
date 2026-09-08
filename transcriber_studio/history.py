@@ -32,9 +32,17 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
+#: Was running when the app stopped. Nothing writes this during a job — it is
+#: applied at startup to entries that claim to be running, because nothing can
+#: be running before the app has started anything. Without it a job that was in
+#: flight when the app closed or crashed says "In progress…" for ever.
+INTERRUPTED = "interrupted"
 
 #: States that mean "nothing was produced" — safe to forget when a job row goes away.
-UNFINISHED = (QUEUED, RUNNING)
+UNFINISHED = (QUEUED, RUNNING, INTERRUPTED)
+
+#: The subset that cannot survive a restart: no job is in flight at startup.
+STALE_ON_START = (QUEUED, RUNNING)
 
 _LABELS = {
     QUEUED: "Queued",
@@ -42,6 +50,7 @@ _LABELS = {
     DONE: "✓ Transcribed",
     FAILED: "✗ Failed",
     CANCELLED: "Cancelled",
+    INTERRUPTED: "⚠ Interrupted",
 }
 
 
@@ -75,6 +84,11 @@ class Entry:
 
     def tooltip(self) -> str:
         lines = [self.label]
+        if self.state == INTERRUPTED:
+            lines.append(
+                "The app stopped before this finished. Queue it again — Resume "
+                "picks up from the last saved step."
+            )
         if self.when:
             lines.append(f"Last activity: {self.when}")
         if self.state == DONE and self.speakers:
@@ -208,6 +222,29 @@ def forget(recording_id: str) -> None:
     entries = dict(load())
     if entries.pop(recording_id, None) is not None:
         _save(entries)
+
+
+def reconcile_stale() -> int:
+    """Retire "running" and "queued" entries left over from a previous session.
+
+    Called once as the app starts. Nothing is in flight at that moment, so an
+    entry claiming otherwise is a leftover from a run that ended without
+    saying so — a crash, a kill, or the window being closed mid-job. Left
+    alone it reads as "In progress…" for ever, and the recordings list keeps
+    reporting work that stopped days ago.
+
+    Marked rather than deleted: a job can die after writing its files, and the
+    entry is the only record of where they went.
+    """
+    entries = dict(load())
+    changed = 0
+    for entry in entries.values():
+        if entry.state in STALE_ON_START:
+            entry.state = INTERRUPTED
+            changed += 1
+    if changed:
+        _save(entries)
+    return changed
 
 
 def drop_unfinished(recordings: Iterable[Recording]) -> None:

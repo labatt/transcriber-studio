@@ -327,3 +327,23 @@ class TokenCheckWorker(QThread):
         # Not days_left: the user token is minted for 24 hours, so whole days
         # rounds almost every good token down to "0 days left".
         self.done.emit(f"Token accepted — {info.describe_remaining()} left.")
+
+
+class MaiTestWorker(QThread):
+    """Proves an Azure Speech key and region reach MAI-Transcribe."""
+
+    ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, api_key: str, region: str, parent=None):
+        super().__init__(parent)
+        self.api_key = api_key
+        self.region = region
+
+    def run(self):
+        from . import stt_mai
+
+        try:
+            self.ok.emit(stt_mai.test_key(self.api_key, self.region))
+        except Exception as e:
+            self.failed.emit(str(e))

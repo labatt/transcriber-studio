@@ -451,6 +451,37 @@ def _dedupe_variants(variants: Iterable[str], canonical: str) -> list[str]:
     return sorted(kept.values(), key=str.lower)
 
 
+#: How many times a term has been seen. Every merge that carries a term adds
+#: its weight to the one already stored, so a name that keeps coming up across
+#: recordings rises above one mentioned once. That ordering is what decides
+#: which terms survive a budget: Whisper's prompt is capped by characters and
+#: Azure's phrase list at fifty entries, and both drop from the tail.
+WEIGHT_KEY = "weight"
+DEFAULT_WEIGHT = 1
+
+
+def term_weight(entry: dict[str, Any]) -> int:
+    """A term's weight, treating anything unusable as one sighting.
+
+    Terms written before weights existed, or typed by hand into the glossary
+    editor, have none — and "seen once" is the honest reading of that, not
+    zero, which would sort them below everything and quietly drop them.
+    """
+    try:
+        value = int(entry.get(WEIGHT_KEY, DEFAULT_WEIGHT))
+    except (TypeError, ValueError):
+        return DEFAULT_WEIGHT
+    return max(DEFAULT_WEIGHT, value)
+
+
+def by_weight(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Heaviest first, then alphabetical so equal weights keep a stable order."""
+    return sorted(
+        entries,
+        key=lambda item: (-term_weight(item), str(item.get("canonical", "")).lower()),
+    )
+
+
 def merge_terms(term_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
     buckets: dict[str, dict[str, Any]] = {}
     for terms in term_lists:
@@ -466,8 +497,13 @@ def merge_terms(term_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
                     # only in case is kept has to be the same on every run.
                     "variants": [],
                     "type_counts": Counter(),
+                    WEIGHT_KEY: 0,
                 }
             bucket = buckets[key]
+            # Summed, not counted: a term arriving with a weight of nine has
+            # been seen nine times already, and a merge must not flatten that
+            # back to one.
+            bucket[WEIGHT_KEY] += term_weight(term)
             bucket["canonical_counts"][canonical] += 1
             bucket["type_counts"][str(term.get("type") or "other")] += 1
             # An unresolved conflict tag outlives the merges that follow it:
@@ -490,11 +526,12 @@ def merge_terms(term_lists: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
             "canonical": canonical,
             "variants": variants,
             "type": term_type,
+            WEIGHT_KEY: bucket[WEIGHT_KEY],
         }
         if bucket.get(CONFLICT_KEY):
             entry[CONFLICT_KEY] = bucket[CONFLICT_KEY]
         merged.append(entry)
-    return sorted(merged, key=lambda item: item["canonical"].lower())
+    return by_weight(merged)
 
 
 def _speaker_score(entry: dict[str, Any]) -> tuple[int, int]:

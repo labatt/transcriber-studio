@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from dataclasses import fields as dataclass_fields
 from typing import Any
 
 from .config import APP_DIR
@@ -33,17 +34,36 @@ def _transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
         "model": transcript.model,
         "speakers": transcript.speakers,
         "segments": [asdict(s) for s in transcript.segments],
+        # The voice vectors ride along so a finished job is still enrollable
+        # after a restart. Without them the queue comes back with names but
+        # nothing to teach the app from, and "Remember this voice" is greyed
+        # out on every job that was in the list before the app closed.
+        "speaker_embeddings": transcript.speaker_embeddings,
+        "speaker_seconds": transcript.speaker_seconds,
     }
 
 
 def _transcript_from_dict(rec: Recording, td: dict[str, Any]) -> TranscriptResult:
-    segments = [Segment(**s) for s in td.get("segments", [])]
+    # Unknown keys are dropped rather than raising: a queue written by a later
+    # version should degrade to a usable job, not stop the app from starting.
+    known = {f.name for f in dataclass_fields(Segment)}
+    segments = [
+        Segment(**{k: v for k, v in s.items() if k in known})
+        for s in td.get("segments", [])
+    ]
     return TranscriptResult(
         recording=rec,
         segments=segments,
         language=td.get("language", ""),
         model=td.get("model", ""),
         speakers=td.get("speakers", []),
+        speaker_embeddings={
+            str(k): [float(x) for x in v]
+            for k, v in (td.get("speaker_embeddings") or {}).items()
+        },
+        speaker_seconds={
+            str(k): float(v) for k, v in (td.get("speaker_seconds") or {}).items()
+        },
     )
 
 

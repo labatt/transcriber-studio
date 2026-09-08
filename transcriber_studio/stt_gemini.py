@@ -85,20 +85,27 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MINUTES_PLAIN = 60
 MAX_MINUTES_WITH_FEATURES = 30
 
-#: What the API actually does, which is not what the docs say. Probed against
+#: What the API *accepts*, which is more than the docs say. Probed against
 #: gemini-3.5-transcribe in verbatim mode with diarization on: 35, 46, 51 and
 #: 54 minutes were all accepted; 57 and 80 minutes came back
-#: "Invalid input received." with no further detail. The documented 30 minute
-#: figure is not enforced, so warning at 30 cried wolf while the real wall at
-#: ~55 arrived as an opaque 400 after uploading the whole file.
-#: Conservative by a couple of minutes, because the boundary was bracketed
-#: rather than pinned exactly and may move.
-PRACTICAL_MINUTES_WITH_FEATURES = 54
+#: "Invalid input received." with no further detail.
+ACCEPTED_MINUTES_WITH_FEATURES = 54
 
-#: What a recording over the ceiling is cut into. Comfortably under the wall
-#: rather than right up against it, because the boundary was bracketed rather
-#: than pinned and Google can move it without telling anyone.
-UPLOAD_CHUNK_MINUTES = 30
+#: What comes back *sane*, which is what the docs say after all. Scored against
+#: reference transcripts (AMI and Earnings-22): every request of exactly 30
+#: minutes returned clean timings; a 33-minute part and a 35.7-minute single
+#: request returned thousands of word timings out of order or out of range, a
+#: 17-word sentence repeated 60 times, and word error rates of 30 to 43 percent
+#: against 7 to 26 for the same audio elsewhere; a 39-minute single request was
+#: mildly affected. Accepted is not the same as transcribed, so this is the
+#: ceiling that matters, and recordings past it are cut into parts.
+PRACTICAL_MINUTES_WITH_FEATURES = MAX_MINUTES_WITH_FEATURES
+
+#: The longest part a recording over the ceiling is cut into, *including* the
+#: repeated lead-in below. A part that ran 30 minutes seam to seam plus the
+#: 3-minute lead-in was 33 minutes long, which is exactly where the output
+#: fell apart.
+UPLOAD_CHUNK_MINUTES = MAX_MINUTES_WITH_FEATURES
 
 #: How much of the previous part each part repeats. The repeated stretch is
 #: transcribed twice and then discarded — it exists so the same speech is seen
@@ -386,6 +393,147 @@ def word_annotations(response: dict) -> list[dict]:
     return words
 
 
+# Word timings Gemini returns are mostly right and occasionally absurd: an end
+# before its start, a start hours past the end of the file, a word that begins
+# minutes before the word it follows. Measured on public meeting and earnings
+# audio, every one of four runs had some. Left alone they turn one word into a
+# segment that spans the whole recording, and the speaker timeline built from
+# them is fiction.
+OUTLIER_WINDOW = 3              # neighbours on each side a start is judged against
+OUTLIER_SECONDS = 30.0          # a start this far from its neighbours' median is a fault
+BACKWARDS_TOLERANCE_S = 5.0     # a start this far before the previous end is a fault, not overlap
+MAX_WORD_SECONDS = 10.0         # no single word is longer than this
+# A decoding loop: the model emits the same run of words over and over. One
+# public earnings call came back with a seventeen-word sentence 60 times in a
+# row. Real speech repeats itself in ones and twos ("no, no, no"), not in runs
+# of five words three times over.
+LOOP_MIN_WORDS = 5
+LOOP_MIN_REPEATS = 3
+LOOP_MAX_WORDS = 40
+_PUNCT = ".,;:!?…\"'()[]-"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def repair_timings(words: list[dict], duration: float | None = None) -> int:
+    """Make word timings sane in place; return how many needed it.
+
+    A start is an outlier when it sits more than OUTLIER_SECONDS from the
+    median of its neighbours' starts, or outside the recording. Judging each
+    word against its neighbours rather than the word before it is what stops
+    one absurd timestamp dragging every word after it along: measured live,
+    a single start of 99,711 s in a 66-minute file did exactly that to the
+    3,400 words that followed. Outliers are placed between the good words
+    around them. Then an end cannot precede its start, a word cannot outlast
+    MAX_WORD_SECONDS, and a start still further than BACKWARDS_TOLERANCE_S
+    behind the previous word is moved up to it. Small overlaps are left alone:
+    two people can talk at once.
+    """
+    idx = [i for i, w in enumerate(words) if w.get("type", "word") == "word"]
+    if not idx:
+        return 0
+    starts = [float(words[i].get("start", 0.0)) for i in idx]
+    ends = [float(words[i].get("end", s)) for i, s in zip(idx, starts, strict=True)]
+    n = len(idx)
+
+    bad = [False] * n
+    for k in range(n):
+        if starts[k] < 0 or (duration and starts[k] > duration + 1.0):
+            bad[k] = True
+            continue
+        lo, hi = max(0, k - OUTLIER_WINDOW), min(n, k + OUTLIER_WINDOW + 1)
+        neighbours = [starts[j] for j in range(lo, hi) if j != k]
+        # With a single neighbour the test is symmetric and would condemn
+        # both words; the monotonic pass below settles a pair on its own.
+        if len(neighbours) >= 2 and abs(starts[k] - _median(neighbours)) > OUTLIER_SECONDS:
+            bad[k] = True
+
+    repaired = 0
+    prev_end = 0.0
+    for k in range(n):
+        start, end = starts[k], ends[k]
+        if bad[k]:
+            nxt = next((starts[j] for j in range(k + 1, n) if not bad[j]), None)
+            start = prev_end
+            end = min(nxt, start + 1.0) if nxt is not None else start + 1.0
+            end = max(end, start)
+        else:
+            if start < prev_end - BACKWARDS_TOLERANCE_S:
+                start = prev_end
+            if end < start:
+                end = start
+            if end - start > MAX_WORD_SECONDS:
+                end = start + MAX_WORD_SECONDS
+            if duration and end > duration:
+                end = max(start, duration)
+        if (start, end) != (starts[k], ends[k]):
+            repaired += 1
+            words[idx[k]]["start"], words[idx[k]]["end"] = start, end
+        prev_end = max(prev_end, end) if not bad[k] else max(prev_end, start)
+    return repaired
+
+
+def collapse_loops(words: list[dict]) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Drop the extra copies of a phrase the model emitted in a loop.
+
+    Returns the surviving words and, for each loop found, (phrase length,
+    times it repeated). Spacing entries that trailed a dropped word go with it.
+    """
+    idx = [i for i, w in enumerate(words) if w.get("type", "word") == "word"]
+    texts = [words[i].get("text", "").strip().lower().strip(_PUNCT) for i in idx]
+    drop: set[int] = set()
+    loops: list[tuple[int, int]] = []
+    pos = 0
+    while pos < len(texts):
+        found = False
+        for n in range(LOOP_MIN_WORDS, LOOP_MAX_WORDS + 1):
+            phrase = texts[pos:pos + n]
+            if len(phrase) < n:
+                break
+            repeats = 1
+            while texts[pos + repeats * n:pos + (repeats + 1) * n] == phrase:
+                repeats += 1
+            if repeats >= LOOP_MIN_REPEATS:
+                for k in range(pos + n, pos + repeats * n):
+                    drop.add(idx[k])
+                loops.append((n, repeats))
+                pos += repeats * n
+                found = True
+                break
+        if not found:
+            pos += 1
+    if not drop:
+        return words, []
+    kept: list[dict] = []
+    dropping = False
+    for i, w in enumerate(words):
+        if w.get("type", "word") == "word":
+            dropping = i in drop
+            if not dropping:
+                kept.append(w)
+        elif not dropping:
+            kept.append(w)
+    return kept, loops
+
+
+def tidy_words(words: list[dict], log=None, duration: float | None = None) -> list[dict]:
+    """Both repairs, with a line in the log for each that had to act."""
+    words, loops = collapse_loops(words)
+    if loops and log:
+        worst = max(loops, key=lambda t: t[0] * t[1])
+        log(f"Gemini: {len(loops)} decoding loop(s) collapsed — the worst repeated a "
+            f"{worst[0]}-word phrase {worst[1]} times in a row.")
+    repaired = repair_timings(words, duration)
+    if repaired and log:
+        log(f"Gemini: {repaired} word timing(s) were out of order or out of range "
+            f"and were repaired.")
+    return words
+
+
 def plain_text(response: dict) -> str:
     """The transcript as one string, for when there are no word annotations."""
     parts = [
@@ -487,7 +635,10 @@ def _transcribe_in_parts(
             response = _post_interaction(
                 uri, mime_type_for(part_path), opts, api_key, log, should_cancel
             )
-            part_words = word_annotations(response)
+            part_words = tidy_words(
+                word_annotations(response), log,
+                audio_utils.probe(part_path).get("duration") or None,
+            )
             for word in part_words:
                 if word.get("type") == "word":
                     word["start"] = float(word.get("start", 0.0)) + offset
@@ -614,7 +765,9 @@ def transcribe(
     if progress_cb:
         progress_cb(0.9)
 
-    words = word_annotations(response)
+    words = tidy_words(
+        word_annotations(response), log, recording.duration_seconds or None
+    )
     if words:
         segments, speakers = words_to_segments(words, diarized=diarize)
     else:

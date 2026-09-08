@@ -19,6 +19,7 @@ from transcriber_studio.glossary_store import CONFLICT_KEY
 from transcriber_studio.ui.glossary_dialog import (
     NEW_GLOSSARY,
     PER_RECORDING_LABEL,
+    TERM_COLS,
     CombineGlossariesDialog,
     GlossaryLibraryDialog,
     populate_glossary_combo,
@@ -28,12 +29,19 @@ from transcriber_studio.ui.options_panel import OptionsPanel
 _app = QApplication.instance() or QApplication([])
 
 
-def _type_term(table, *values: str) -> int:
-    """Add a row and fill its editable cells, as a person would."""
+def _col(name: str) -> int:
+    """A column by its header. Indices shift whenever a column is added — the
+    "Seen" weight column did exactly that — and a stale index does not fail
+    loudly, it edits the wrong cell."""
+    return TERM_COLS.index(name)
+
+
+def _type_term(table, **cells: str) -> int:
+    """Add a row and fill named cells, as a person would."""
     table.add_row()
     row = table.table.rowCount() - 1
-    for col, value in enumerate(values):
-        table.table.item(row, col).setText(value)
+    for name, value in cells.items():
+        table.table.item(row, _col(name)).setText(value)
     return row
 
 
@@ -113,7 +121,8 @@ def test_library_dialog_creates_edits_and_saves_terms():
         created = glossary_store.create("Acme Account")
         dlg = GlossaryLibraryDialog(selected=created.id)
 
-        _type_term(dlg.terms, "GrowthMark", "product", "growth mark, growth market")
+        _type_term(dlg.terms, Term="GrowthMark", Type="product",
+                   **{"Variants (comma separated)": "growth mark, growth market"})
         dlg._save_current()
 
         stored = glossary_store.load(created.id)
@@ -188,7 +197,7 @@ def test_editing_the_column_they_disagreed_about_clears_the_tag():
         dlg._merge_into(glossary_store.load(left.id), [Part.of(left), Part.of(right)])
 
         table = dlg.terms.table
-        table.item(_row_of(table, "Scribe"), 1).setText("concept")   # settled
+        table.item(_row_of(table, "Scribe"), _col("Type")).setText("concept")   # settled
         dlg._save_current()
 
         stored = {t["canonical"]: t for t in glossary_store.load(left.id).terms}
@@ -205,7 +214,7 @@ def test_keep_as_is_drops_the_tag_without_changing_the_row():
 
         table = dlg.terms.table
         row = _row_of(table, "Scribe")
-        before = table.item(row, 1).text()
+        before = table.item(row, _col("Type")).text()
         table.selectRow(row)
         dlg.terms.clear_selected_tags()
         dlg._save_current()

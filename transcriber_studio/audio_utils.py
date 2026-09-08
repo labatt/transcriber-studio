@@ -204,12 +204,13 @@ def split_for_upload(
 ) -> list[tuple[str, float, float]]:
     """Cut a recording into uploadable parts. Returns (path, start, seam).
 
-    ``start`` puts the part's timestamps back on the original timeline. ``seam``
-    is where this part's words actually belong: every part after the first
-    begins ``overlap`` seconds early, and that lead-in is transcribed twice on
-    purpose. Hearing the same speech in two parts is what lets an engine that
-    numbers speakers per request be matched up across the join — the duplicate
-    words themselves are thrown away.
+    No part is longer than ``target_seconds``, lead-in included. ``start`` puts
+    the part's timestamps back on the original timeline. ``seam`` is where this
+    part's words actually belong: every part after the first begins ``overlap``
+    seconds early, and that lead-in is transcribed twice on purpose. Hearing
+    the same speech in two parts is what lets an engine that numbers speakers
+    per request be matched up across the join — the duplicate words themselves
+    are thrown away.
     """
     info = probe(path)
     duration = float(info.get("duration") or 0.0)
@@ -220,18 +221,16 @@ def split_for_upload(
         quiet = silence_midpoints(path, timeout=timeout)
     except (subprocess.SubprocessError, OSError):
         quiet = []          # no pauses found is not fatal; cut on the clock
-    cuts = split_points(duration, target_seconds, quiet)
+    spans = part_spans(duration, target_seconds, overlap, quiet)
     if log:
+        cuts = [seam for _, seam, _ in spans[1:]]
         landed = sum(1 for c in cuts if any(abs(c - q) < 0.01 for q in quiet))
-        log(f"Splitting into {len(cuts) + 1} part(s) — {landed} of {len(cuts)} "
+        log(f"Splitting into {len(spans)} part(s) — {landed} of {len(cuts)} "
             f"cut(s) landed on a pause.")
 
-    bounds = [0.0, *cuts, duration]
     suffix = Path(path).suffix or ".wav"
     parts: list[tuple[str, float, float]] = []
-    for index in range(len(bounds) - 1):
-        seam, end = bounds[index], bounds[index + 1]
-        start = max(0.0, seam - overlap) if index else 0.0
+    for index, (start, seam, end) in enumerate(spans):
         part = Path(out_dir) / f"part{index:03d}{suffix}"
         subprocess.run(
             [FFMPEG, "-y", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
@@ -240,3 +239,92 @@ def split_for_upload(
         )
         parts.append((str(part), start, seam))
     return parts
+
+
+def part_spans(
+    duration: float, target: float, overlap: float, quiet: list[float]
+) -> list[tuple[float, float, float]]:
+    """(start, seam, end) for each part, none longer than ``target``.
+
+    The seams are placed ``target - overlap`` apart so that once the lead-in
+    is prepended the part is at most ``target`` long. Sizing the seams at the
+    full target and then adding the lead-in made every middle part
+    ``overlap`` too long, and for Gemini that was the difference between a
+    clean transcript and one with its timings in pieces.
+    """
+    stride = max(60.0, target - overlap) if overlap else target
+    cuts = split_points(duration, stride, quiet)
+    bounds = [0.0, *cuts, duration]
+    spans: list[tuple[float, float, float]] = []
+    for index in range(len(bounds) - 1):
+        seam, end = bounds[index], bounds[index + 1]
+        start = max(0.0, seam - overlap) if index else 0.0
+        spans.append((start, seam, end))
+    return spans
+
+
+# ---- shrinking a recording before it goes to the cloud ----------------
+#: Speech, mono, at the sample rate every recogniser resamples to anyway.
+#: 32 kbit/s is generous for voice — the models take 16 kHz input, so nothing
+#: above that band survives the trip regardless of what was uploaded.
+UPLOAD_SAMPLE_RATE = 16_000
+UPLOAD_BITRATE_KBPS = 32
+
+#: Below this there is nothing to gain: re-encoding costs CPU and a few
+#: seconds, and a small file already uploads in moments.
+COMPRESS_ABOVE_BYTES = 8 * 1024 * 1024
+
+
+def compress_for_upload(path: str, out_dir: str, log=None,
+                        timeout: float = FFMPEG_TIMEOUT) -> str:
+    """A smaller copy for uploading, or the original when that is pointless.
+
+    A Plaud recording arrives as a 128 kbit/s stereo-ish MP3, and denoising
+    turns it into uncompressed WAV — 73 minutes of speech became 70 MB one way
+    and 140 MB the other. Neither is anything to do with how much information
+    the recogniser can use: it resamples to 16 kHz mono before the first layer.
+
+    Sending the smaller file is not only faster. Azure's endpoint applies its
+    own request timeout, and a 70 MB upload that took two minutes came back as
+    "RequestTimeout" having never been transcribed at all — the audio was well
+    inside the documented five-hour limit, but the *transfer* was not inside
+    the service's patience.
+
+    Never fatal: if ffmpeg is missing or fails, the original path is returned
+    and the upload proceeds as it did before.
+    """
+    source = Path(path)
+    try:
+        original = source.stat().st_size
+    except OSError:
+        return path
+    if original <= COMPRESS_ABOVE_BYTES or not have_ffmpeg():
+        return path
+
+    dest = Path(out_dir) / f"{source.stem}.upload.mp3"
+    try:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [FFMPEG, "-y", "-i", str(source),
+             "-vn", "-map_metadata", "-1",
+             "-ac", "1", "-ar", str(UPLOAD_SAMPLE_RATE),
+             "-b:a", f"{UPLOAD_BITRATE_KBPS}k", str(dest)],
+            capture_output=True, check=True, timeout=timeout,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        if log:
+            log(f"Could not compress before upload ({e}) — sending the original.")
+        return path
+    try:
+        reduced = dest.stat().st_size
+    except OSError:
+        return path
+    if reduced >= original:
+        return path         # already smaller than anything we would make
+    if log:
+        log(
+            f"Compressed for upload: {original / 1e6:.0f} MB to "
+            f"{reduced / 1e6:.0f} MB ({UPLOAD_SAMPLE_RATE // 1000} kHz mono) — "
+            "the recogniser resamples to this anyway."
+        )
+    return str(dest)

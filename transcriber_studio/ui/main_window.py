@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import config, history
+from .. import config, filename_builder, history
 from .. import resume as resume_store
 from ..config import Settings
 from ..hardware import (
@@ -52,6 +53,7 @@ from ..queue_store import clear_queue_file, load_queue, save_queue
 from ..workers import AccountWorker, CleanupWorker, DiarizationWorker, TranscriptionWorker
 from . import theme
 from .ai_cleanup_dialog import AICleanupDialog
+from .flow_layout import FlowLayout
 from .glossary_dialog import GlossaryLibraryDialog
 from .local_files_tab import LocalFilesTab
 from .options_panel import OptionsPanel
@@ -59,8 +61,13 @@ from .recordings_tab import RecordingsTab
 from .rename_dialog import SpeakerRenameDialog
 from .settings_dialog import SettingsDialog
 from .setup_wizard import SetupWizard
+from .speakers_dialog import SpeakersDialog
 
 QUEUE_COLS = ["Recording", "Source", "Status", "Progress", "Output"]
+
+#: Message text is joined rather than escaped; it reads better in source
+#: and it is what the dialog actually renders.
+LINE_BREAK = chr(10)
 
 GO_BTN_STYLE = """
 QPushButton#goBtn {
@@ -123,12 +130,27 @@ class ElidingLabel(QLabel):
         self.setMinimumWidth(48)
         self.setText(text)
 
+    def setText(self, text: str) -> None:
+        """Remember the whole string, show as much of it as fits.
+
+        Overridden because this label is now used for text that changes after
+        construction. Without it the label kept eliding whatever it was built
+        with, and the next resize would put the old text back.
+        """
+        self._full = text
+        self.setToolTip(text)
+        super().setText(self._elided())
+
+    def _elided(self) -> str:
+        return self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideMiddle, max(1, self.width())
+        )
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        elided = self.fontMetrics().elidedText(
-            self._full, Qt.TextElideMode.ElideMiddle, self.width()
-        )
+        elided = self._elided()
         if elided != self.text():
+            # super(), not self: this is the display copy, not a new full value.
             super().setText(elided)
 
 
@@ -136,6 +158,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings: Settings = config.load()
+        # Before anything reads the history: a job that says it is running was
+        # left that way by a previous session, because nothing is in flight yet.
+        self._stale_jobs = history.reconcile_stale()
         self.setWindowTitle(config.APP_NAME)
         self.resize(1180, 820)
 
@@ -143,6 +168,13 @@ class MainWindow(QMainWindow):
         self._diar_worker: DiarizationWorker | None = None
         self._cleanup_worker: CleanupWorker | None = None
         self._acct_worker: AccountWorker | None = None
+        # Every worker thread currently running. A QThread collected while its
+        # thread is still going makes Qt abort the process outright — no
+        # traceback, exit 127 — and each worker used to live in a single
+        # attribute that the next one overwrote. Clicking Logout while the
+        # startup account check was still waiting on an expired token was
+        # enough to destroy that check mid-flight and take the app with it.
+        self._live_workers: set = set()
         self._results: dict[int, JobResult] = {}
         self._queue_recordings: list[Recording] = []
         self._queue_statuses: list[str] = []
@@ -161,6 +193,14 @@ class MainWindow(QMainWindow):
         self._update_job_actions()   # reflect restored rows (e.g. Resume availability)
         # After the window is up, so the wizard opens over a drawn app rather
         # than an empty frame.
+        if self._stale_jobs:
+            # Said out loud rather than silently corrected: those recordings
+            # looked finished in the list and were not.
+            self._log(
+                f"{self._stale_jobs} job(s) were still running when the app last "
+                "closed — marked as interrupted. Queue them again and press "
+                "Resume to carry on from the last saved step."
+            )
         QTimer.singleShot(0, self._maybe_run_setup_wizard)
 
     # ------------------------------------------------------------------
@@ -171,12 +211,12 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(10, 6, 10, 6)
         row.setSpacing(8)
 
-        self.account_label = QLabel("Checking Plaud login…")
+        self.account_label = ElidingLabel("Checking Plaud login…")
         self.account_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.account_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         row.addWidget(self.account_label, stretch=1)
 
-        self.gpu_badge = QLabel()
+        self.gpu_badge = ElidingLabel("")
         self.gpu_badge.setObjectName("gpuBadge")
         row.addWidget(self.gpu_badge)
 
@@ -190,19 +230,29 @@ class MainWindow(QMainWindow):
         self.glossaries_btn.setToolTip(
             "Create and edit the shared glossaries that jobs read from and write to."
         )
+        self.speakers_btn = QPushButton("Speakers")
+        self.speakers_btn.setToolTip(
+            "The voices the app can recognise, and how sure it has to be "
+            "before it uses one."
+        )
         self.settings_btn = QPushButton("Settings")
+        header_buttons = FlowLayout(spacing=8)
         for btn in (
             self.login_btn, self.logout_btn, self.setup_btn,
-            self.glossaries_btn, self.settings_btn,
+            self.glossaries_btn, self.speakers_btn, self.settings_btn,
         ):
             btn.setFixedWidth(88)
             btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            row.addWidget(btn)
+            header_buttons.addWidget(btn)
+        header_button_holder = QWidget()
+        header_button_holder.setLayout(header_buttons)
+        row.addWidget(header_button_holder)
 
         self.login_btn.clicked.connect(self._login)
         self.logout_btn.clicked.connect(self._logout)
         self.setup_btn.clicked.connect(self._run_setup_wizard)
         self.glossaries_btn.clicked.connect(self._open_glossaries)
+        self.speakers_btn.clicked.connect(self._open_speakers)
         self.settings_btn.clicked.connect(lambda: self._open_settings())
 
         wrapper = QWidget()
@@ -243,7 +293,10 @@ class MainWindow(QMainWindow):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         scroll.setFrameShape(QFrame.Shape.StyledPanel)
         scroll.setWidget(self.options)
-        scroll.setMinimumWidth(300)
+        # Wide enough to stay grabbable, not so wide that the Options column
+        # decides how narrow the window may be. The splitter remembers whatever
+        # width the user drags it to.
+        scroll.setMinimumWidth(150)
         self._options_scroll = scroll
         splitter.addWidget(scroll)
         splitter.setStretchFactor(0, 3)
@@ -275,6 +328,8 @@ class MainWindow(QMainWindow):
         jobs_header = QHBoxLayout()
         jobs_header.addWidget(QLabel("Jobs"))
         jobs_header.addStretch()
+        # Six buttons in a fixed row were 950px of floor under the window.
+        jobs_buttons = FlowLayout(spacing=6)
         self.remove_job_btn = QPushButton("Remove selected")
         self.remove_job_btn.clicked.connect(self._remove_selected_jobs)
         self.clear_jobs_btn = QPushButton("Clear all")
@@ -300,7 +355,11 @@ class MainWindow(QMainWindow):
             self.ai_cleanup_btn,
         ):
             btn.setAutoDefault(False)   # Enter must never trigger these either
-            jobs_header.addWidget(btn)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            jobs_buttons.addWidget(btn)
+        jobs_button_holder = QWidget()
+        jobs_button_holder.setLayout(jobs_buttons)
+        jobs_header.addWidget(jobs_button_holder)
         outer.addLayout(jobs_header)
 
         # jobs table
@@ -382,10 +441,12 @@ class MainWindow(QMainWindow):
 
     # ---- account ------------------------------------------------------
     def _refresh_account(self):
-        self._acct_worker = AccountWorker("me")
-        self._acct_worker.done.connect(self._on_account)
-        self._acct_worker.error.connect(lambda m: self.account_label.setText(f"  Plaud: {m}  "))
-        self._acct_worker.start()
+        if self._account_busy():
+            return
+        worker = AccountWorker("me")
+        worker.done.connect(self._on_account)
+        worker.error.connect(lambda m: self.account_label.setText(f"  Plaud: {m}  "))
+        self._start_account_worker(worker)
 
     def _on_account(self, account):
         if account:
@@ -415,12 +476,83 @@ class MainWindow(QMainWindow):
         self._log("Plaud session active — loading recordings…")
         self.recordings_tab.load("files")
 
+    #: How long a closing window waits for its threads. Long enough for a
+    #: network call to notice it was cancelled, short enough that closing the
+    #: app never feels like it has hung.
+    SHUTDOWN_GRACE_MS = 4000
+
+    def closeEvent(self, event):
+        """Do not leave a thread running into interpreter shutdown.
+
+        Qt destroys any QThread still running when the process ends, and a
+        destroyed running thread aborts rather than unwinds: the app vanishes
+        with no traceback and an exit code that says nothing. So the window
+        asks its workers to stop, gives them a moment, and only then closes.
+        """
+        workers = [w for w in list(self._live_workers) if w.isRunning()]
+        for worker in workers:
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+        for worker in workers:
+            if not worker.wait(self.SHUTDOWN_GRACE_MS):
+                # Out of patience. Terminating a thread is a blunt thing to do
+                # and can leave its own work half-finished, but the alternative
+                # here is a guaranteed abort a moment later, which leaves the
+                # same work half-finished and takes the log with it.
+                worker.terminate()
+                worker.wait(1000)
+        self._live_workers.clear()
+        super().closeEvent(event)
+
+    def _track(self, worker):
+        """Keep a worker alive until its thread actually finishes.
+
+        Held in a set rather than an attribute so that starting a second one
+        cannot orphan the first. Returns the worker, so it can wrap a
+        constructor at the call site.
+        """
+        self._live_workers.add(worker)
+        worker.finished.connect(lambda w=worker: self._live_workers.discard(w))
+        return worker
+
+    def _set_account_busy(self, busy: bool) -> None:
+        """Grey the account buttons while a Plaud call is in flight.
+
+        The check runs against the `plaud` CLI, which waits up to a minute
+        before giving up. An expired token spends that whole minute, and with
+        the buttons live the header says "Checking Plaud login…" the entire
+        time while Login and Logout look ready to press.
+        """
+        for btn in (self.login_btn, self.logout_btn):
+            btn.setEnabled(not busy)
+
+    def _start_account_worker(self, worker):
+        """Run one account action, with the buttons held until it lands."""
+        self._acct_worker = self._track(worker)
+        self._set_account_busy(True)
+        worker.finished.connect(lambda: self._set_account_busy(False))
+        worker.start()
+        return worker
+
+    def _account_busy(self) -> bool:
+        """True while a login / logout / account check is still running.
+
+        Two of these at once means two `plaud` CLI calls racing over the same
+        token file, and the second answer overwriting the first.
+        """
+        worker = self._acct_worker
+        return worker is not None and worker.isRunning()
+
     def _login(self):
+        if self._account_busy():
+            self._log("Already talking to Plaud — wait for that to finish.")
+            return
         self._log("Opening Plaud login in your browser…")
-        self._acct_worker = AccountWorker("login")
-        self._acct_worker.done.connect(self._on_account)
-        self._acct_worker.error.connect(self._on_login_error)
-        self._acct_worker.start()
+        worker = AccountWorker("login")
+        worker.done.connect(self._on_account)
+        worker.error.connect(self._on_login_error)
+        self._start_account_worker(worker)
 
     def _on_login_error(self, message: str):
         self._log(f"Login failed: {message.splitlines()[0]}")
@@ -433,10 +565,13 @@ class MainWindow(QMainWindow):
         box.exec()
 
     def _logout(self):
-        self._acct_worker = AccountWorker("logout")
-        self._acct_worker.done.connect(self._on_account)
-        self._acct_worker.error.connect(lambda m: QMessageBox.warning(self, "Logout failed", m))
-        self._acct_worker.start()
+        if self._account_busy():
+            self._log("Already talking to Plaud — wait for that to finish.")
+            return
+        worker = AccountWorker("logout")
+        worker.done.connect(self._on_account)
+        worker.error.connect(lambda m: QMessageBox.warning(self, "Logout failed", m))
+        self._start_account_worker(worker)
 
     # ---- setup wizard ---------------------------------------------------
     def _maybe_run_setup_wizard(self):
@@ -473,6 +608,16 @@ class MainWindow(QMainWindow):
         dlg.exec()
         # The panel's chooser lists names and sizes, so it has to be re-read.
         self.options.refresh_glossaries()
+
+    def _open_speakers(self):
+        dlg = SpeakersDialog(self.settings, self)
+        if dlg.exec():
+            # Saved in the dialog; said here so the run log carries the change
+            # next to the transcripts it will affect.
+            self._log(
+                f"Speaker recognition: match at {self.settings.voiceprint_threshold:.2f} "
+                f"with a {self.settings.voiceprint_margin:.2f} margin."
+            )
 
     def _open_settings(self, tab: str = ""):
         dlg = SettingsDialog(self.settings, self, tab=tab)
@@ -559,7 +704,9 @@ class MainWindow(QMainWindow):
                   f"formats={','.join(self.settings.formats)}, "
                   f"diarization={'on' if self.settings.diarization_enabled else 'off'}.")
 
-        self._worker = TranscriptionWorker(self.settings, recs, start_row=start_row)
+        self._worker = self._track(
+            TranscriptionWorker(self.settings, recs, start_row=start_row)
+        )
         self._worker.started_item.connect(self._on_item_started)
         self._worker.progress_item.connect(self._on_item_progress)
         self._worker.log_item.connect(self._on_item_log)
@@ -630,7 +777,9 @@ class MainWindow(QMainWindow):
         self._log(f"Resuming [{rec.display_name}] — reusing {progress}.")
 
         # start_row reuses this row rather than appending a duplicate.
-        self._worker = TranscriptionWorker(self.settings, [rec], start_row=row)
+        self._worker = self._track(
+            TranscriptionWorker(self.settings, [rec], start_row=row)
+        )
         self._worker.started_item.connect(self._on_item_started)
         self._worker.progress_item.connect(self._on_item_progress)
         self._worker.log_item.connect(self._on_item_log)
@@ -698,7 +847,19 @@ class MainWindow(QMainWindow):
         open_btn.clicked.connect(
             lambda _checked=False, p=list(paths), btn=open_btn: self._open_output_paths(p, btn)
         )
+        rename_btn = QPushButton("Rename")
+        rename_btn.setStyleSheet(OUTPUT_OPEN_BTN_STYLE)
+        rename_btn.setFixedWidth(66)
+        rename_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        rename_btn.setToolTip(
+            "Rename the written file. A job that wrote several formats renames "
+            "them together, so the set keeps one name between them."
+        )
+        rename_btn.clicked.connect(
+            lambda _checked=False, r=row, btn=rename_btn: self._rename_output(r, btn)
+        )
         row_layout.addWidget(label, stretch=1)
+        row_layout.addWidget(rename_btn, stretch=0, alignment=Qt.AlignmentFlag.AlignVCenter)
         row_layout.addWidget(open_btn, stretch=0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.queue.setCellWidget(row, 4, wrap)
         self.queue.resizeRowToContents(row)
@@ -707,6 +868,107 @@ class MainWindow(QMainWindow):
         self.queue.removeCellWidget(row, 4)
         item = self._queue_item(text or "—")
         self.queue.setItem(row, 4, item)
+
+    def _rename_output(self, row: int, button: QPushButton | None = None) -> None:
+        """Rename a job's written files, keeping the set together.
+
+        A job usually writes the same transcript several times — .txt, .srt,
+        .json — under one stem. Renaming them one at a time would let the set
+        drift apart, so the whole set moves together and only the extensions
+        differ afterwards. Files written under different stems are rarer and are
+        offered individually instead.
+        """
+        result = self._results.get(row)
+        paths = list(result.output_paths) if result else []
+        existing = [Path(p) for p in paths if Path(p).is_file()]
+        missing = len(paths) - len(existing)
+        if not existing:
+            QMessageBox.warning(
+                self, "Rename output",
+                "None of this job's output files are on disk any more.",
+            )
+            return
+
+        stems = {p.stem for p in existing}
+        if len(stems) == 1:
+            self._rename_output_set(row, existing, stems.pop(), missing)
+            return
+        # Different stems: renaming them as one set would be a lie about what
+        # is on disk, so let the user pick which one they meant.
+        menu = QMenu(self)
+        for path in existing:
+            menu.addAction(
+                path.name,
+                lambda _checked=False, p=path: self._rename_output_set(
+                    row, [p], p.stem, 0
+                ),
+            )
+        if button is not None:
+            menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        else:
+            menu.exec()
+
+    def _rename_output_set(
+        self, row: int, files: list[Path], stem: str, missing: int = 0,
+    ) -> None:
+        suffixes = ", ".join(sorted(p.suffix or "(no extension)" for p in files))
+        prompt = f"New name for {len(files)} file(s) — {suffixes}:"
+        if missing:
+            prompt += LINE_BREAK + f"({missing} more from this job are no longer on disk.)"
+        new_stem, ok = QInputDialog.getText(
+            self, "Rename output", prompt, text=stem
+        )
+        if not ok:
+            return
+        # Emptiness is checked before sanitising, not after: sanitise() falls
+        # back to "untitled" so a generated filename always exists, and letting
+        # that through here would rename the file to something the user never
+        # typed instead of telling them the field was blank.
+        if not new_stem.strip():
+            QMessageBox.warning(self, "Rename output", "A file needs a name.")
+            return
+        new_stem = filename_builder.sanitize(new_stem, self.settings.sanitize_names).strip()
+        if new_stem == stem:
+            return
+
+        planned = [(p, p.with_name(new_stem + p.suffix)) for p in files]
+        clashes = [
+            dest for source, dest in planned if dest.exists() and dest != source
+        ]
+        if clashes:
+            QMessageBox.warning(
+                self, "Rename output",
+                "Already there:" + LINE_BREAK
+                + LINE_BREAK.join(c.name for c in clashes)
+                + LINE_BREAK * 2
+                + "Pick another name — renaming onto them would "
+                "destroy files this job did not write.",
+            )
+            return
+
+        done: list[tuple[Path, Path]] = []
+        try:
+            for source, dest in planned:
+                source.rename(dest)
+                done.append((source, dest))
+        except OSError as e:
+            # Put back whatever moved, so a half-renamed set never survives:
+            # some of the files under the old name and some under the new one
+            # is worse than either.
+            for source, dest in reversed(done):
+                try:
+                    dest.rename(source)
+                except OSError:
+                    break
+            QMessageBox.warning(self, "Rename output", f"Could not rename: {e}")
+            return
+
+        renamed = {str(source): str(dest) for source, dest in done}
+        result = self._results.get(row)
+        if result is not None:
+            result.output_paths = [renamed.get(p, p) for p in result.output_paths]
+            self._set_output_cell(row, result.output_paths)
+        self._log(f"Renamed {len(done)} output file(s) to “{new_stem}”.")
 
     def _open_output_paths(self, paths: list[str], button: QPushButton | None = None) -> None:
         existing = [str(Path(p).resolve()) for p in paths if Path(p).is_file()]
@@ -1126,7 +1388,7 @@ class MainWindow(QMainWindow):
         self._rename_speakers(row, result)
 
     def _rename_speakers(self, row: int, result: JobResult):
-        dlg = SpeakerRenameDialog(result.transcript, self)
+        dlg = SpeakerRenameDialog(result.transcript, self, settings=self.settings)
         if not dlg.exec():
             return
         renames = dlg.renames()
@@ -1189,7 +1451,7 @@ class MainWindow(QMainWindow):
         self._processing_row = row
         self.start_btn.setEnabled(False)
         self._set_status(row, "Detecting speakers…")
-        self._diar_worker = DiarizationWorker(self.settings, row, result)
+        self._diar_worker = self._track(DiarizationWorker(self.settings, row, result))
         self._diar_worker.log_item.connect(self._on_item_log)
         self._diar_worker.progress_item.connect(self._on_item_progress)
         self._diar_worker.done.connect(self._on_diarization_done)
@@ -1232,7 +1494,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self._set_status(row, "AI Cleanup…")
         self._begin_indeterminate_progress(row, "AI Cleanup…")
-        self._cleanup_worker = CleanupWorker(
+        self._cleanup_worker = self._track(CleanupWorker(
             self.settings,
             row,
             result,
@@ -1240,7 +1502,7 @@ class MainWindow(QMainWindow):
             model=model,
             use_original=use_original,
             glossary_id=glossary_id,
-        )
+        ))
         self._cleanup_worker.log_item.connect(self._on_item_log)
         self._cleanup_worker.progress_item.connect(self._on_item_progress)
         self._cleanup_worker.done.connect(self._on_cleanup_done)

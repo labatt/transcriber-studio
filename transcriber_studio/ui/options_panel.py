@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -32,10 +33,14 @@ from ..transcriber import (
     ENGINE_GEMINI,
     ENGINE_LABELS,
     ENGINE_LOCAL,
+    ENGINE_MAI,
     faster_whisper_available,
 )
 from .glossary_dialog import GlossaryLibraryDialog, populate_glossary_combo
 from .theme import muted_small
+
+#: Dialog text is joined rather than escaped; it reads better in source.
+LINE_BREAK = chr(10)
 
 FORMAT_OPTIONS = [
     ("txt", "Text (.txt)"),
@@ -82,12 +87,19 @@ class OptionsPanel(QWidget):
             ENGINE_GEMINI:
                 "Uploads the audio to Google. Transcribes and separates speakers in one pass, "
                 "using the same Google AI key as AI Cleanup.",
+            ENGINE_MAI:
+                "Uploads the audio to Azure. Transcribes and separates speakers in one pass, "
+                "takes the glossary as recognition hints, and offers the words as spoken or "
+                "tidied. Needs an Azure Speech key in Settings.",
         }
-        for row, engine_id in enumerate((ENGINE_LOCAL, ENGINE_ELEVENLABS, ENGINE_GEMINI)):
+        for row, engine_id in enumerate(
+            (ENGINE_LOCAL, ENGINE_ELEVENLABS, ENGINE_GEMINI, ENGINE_MAI)
+        ):
             self.engine.addItem(ENGINE_LABELS[engine_id], engine_id)
             self.engine.setItemData(row, tips[engine_id], Qt.ItemDataRole.ToolTipRole)
         idx = self.engine.findData(settings.stt_engine)
         self.engine.setCurrentIndex(idx if idx >= 0 else 0)
+        self.engine.currentIndexChanged.connect(self._on_engine_chosen)
         self.engine.currentIndexChanged.connect(self._update_engine_status)
         self.engine.currentIndexChanged.connect(self._update_pipeline_status)
         ef.addRow("Engine:", self.engine)
@@ -279,6 +291,9 @@ class OptionsPanel(QWidget):
         label = QLabel(f'<a href="{tab}">{text}</a>')
         label.setStyleSheet(muted_small())
         label.setOpenExternalLinks(False)
+        # These sit in the Options column, which the user can drag narrow.
+        # Unwrapped, each one holds the whole window open to its own width.
+        label.setWordWrap(True)
         label.setAlignment(Qt.AlignmentFlag.AlignRight)
         label.linkActivated.connect(self.open_settings.emit)
         return label
@@ -303,6 +318,57 @@ class OptionsPanel(QWidget):
         populate_glossary_combo(self.shared_glossary, dlg.selected_id() or current)
 
     # ---- engine -------------------------------------------------------
+    #: Turned off when MAI-Transcribe is chosen, with a note saying why.
+    #: Denoise re-encodes to uncompressed WAV, which doubled a 70 MB recording
+    #: to 140 MB before upload — and MAI states noise robustness as one of its
+    #: own features, so the work is paid for twice and helps once at most.
+    #: AI Cleanup used to be on this list on the theory that the model's
+    #: "clean" style made it redundant. Measured, the clean style deletes real
+    #: clauses, so the recommended setup is verbatim plus AI Cleanup — and
+    #: turning cleanup off on the engine switch worked directly against that.
+    MAI_DISABLES = ("denoise_on",)
+
+    def _on_engine_chosen(self, _index: int = 0):
+        """Switching to MAI turns off the one stage it makes redundant.
+
+        Done on the switch rather than silently at run time, so the state the
+        panel shows is the state the job will use — and announced, because
+        turning off someone's settings without saying so is worse than leaving
+        them on.
+        """
+        if self.engine.currentData() != ENGINE_MAI:
+            return
+        turned_off = [
+            name for name in self.MAI_DISABLES
+            if getattr(self, name).isChecked()
+        ]
+        if not turned_off:
+            return          # already off: nothing happened, so say nothing
+        for name in turned_off:
+            getattr(self, name).setChecked(False)
+        self._announce_mai_defaults(turned_off)
+
+    def _announce_mai_defaults(self, turned_off: list[str]) -> None:
+        reasons = {
+            "denoise_on": (
+                "Denoising is off. It re-encodes the audio to uncompressed WAV, "
+                "which doubles the upload — a 70 MB recording becomes 140 MB — "
+                "and MAI-Transcribe handles background noise itself."
+            ),
+        }
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Switched to MAI-Transcribe")
+        box.setText("One step has been turned off for this engine.")
+        box.setInformativeText(
+            LINE_BREAK.join(reasons[name] for name in turned_off)
+            + LINE_BREAK * 2
+            + "Turn it back on if you want it — this only happens when you "
+            "pick the engine, not on every run."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
     def _update_engine_status(self, _index: int = 0):
         """Say what the current engine needs, before Go finds out the hard way."""
         if self.engine.currentData() == ENGINE_GEMINI:
@@ -316,6 +382,33 @@ class OptionsPanel(QWidget):
             else:
                 self.engine_status.setText(
                     "No Google AI key yet — add one in Settings (the same key AI Cleanup uses)."
+                )
+        elif self.engine.currentData() == ENGINE_MAI:
+            if self.s.mai_api_key.strip():
+                style = "as spoken" if self.s.mai_style == "verbatim" else "tidied"
+                hints = (
+                    ", with the glossary sent as recognition hints"
+                    if self.s.mai_send_phrases else ""
+                )
+                if (self.s.mai_speakers or "local") == "local":
+                    speakers = (
+                        "Speakers are detected here with pyannote afterwards, so "
+                        "enrolled voiceprints can name them."
+                    )
+                else:
+                    speakers = (
+                        "MAI separates the speakers itself — measured to fail by "
+                        "15 minutes — and returns no voice data, so voiceprints "
+                        "cannot name anyone."
+                    )
+                self.engine_status.setText(
+                    f"Audio is uploaded to Azure ({self.s.mai_model}, {self.s.mai_region}), "
+                    f"{style}{hints}. {speakers}"
+                )
+            else:
+                self.engine_status.setText(
+                    "No Azure Speech key yet — add one in Settings → Engines. Needs an "
+                    "Azure Foundry Speech resource in one of six regions."
                 )
         elif self.engine.currentData() == ENGINE_ELEVENLABS:
             model = self.s.elevenlabs_model or "scribe_v1"

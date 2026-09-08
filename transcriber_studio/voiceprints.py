@@ -227,7 +227,64 @@ def delete_profile(name: str) -> bool:
         return False
 
 
-def enroll(name: str, vector, *, seconds: float, source: str = "") -> SpeakerProfile:
+def rename_profile(old_name: str, new_name: str) -> SpeakerProfile:
+    """Change who a set of voiceprints belongs to.
+
+    Written to the new name and the old file removed, rather than edited in
+    place, because the filename is derived from the name — leaving the old file
+    behind would make one person appear twice.
+    """
+    clean = (new_name or "").strip()
+    if not clean:
+        raise VoiceprintError("Give the speaker a name.")
+    profile = get_profile(old_name)
+    if profile is None:
+        raise VoiceprintError(f"No voiceprint saved for “{old_name}”.")
+    existing = get_profile(clean)
+    if existing is not None and _slug(clean) != _slug(old_name):
+        raise VoiceprintError(
+            f"“{clean}” is already enrolled. Delete one of them first, or pick "
+            "a name that tells them apart."
+        )
+    previous = _profile_path(profile.name)
+    profile.name = clean
+    save_profile(profile)
+    new_path = _profile_path(clean)
+    if previous != new_path:
+        try:
+            previous.unlink()
+        except OSError:
+            pass
+    return profile
+
+
+def forget_sample(name: str, index: int) -> SpeakerProfile | None:
+    """Drop one capture from a person, keeping the rest.
+
+    The reason this exists separately from deleting the person: a single bad
+    sample — the meeting where they were on speakerphone in a car — drags every
+    later match toward it, and losing that one capture should not mean enrolling
+    them again from scratch.
+    """
+    profile = get_profile(name)
+    if profile is None:
+        raise VoiceprintError(f"No voiceprint saved for “{name}”.")
+    if not 0 <= index < len(profile.prints):
+        raise VoiceprintError("That sample is no longer there.")
+    profile.prints.pop(index)
+    if not profile.prints:
+        # A person with no captures cannot match anything; keeping the file
+        # would leave a name in the list that never does anything.
+        delete_profile(profile.name)
+        return None
+    save_profile(profile)
+    return profile
+
+
+def enroll(
+    name: str, vector, *, seconds: float, source: str = "",
+    minimum_seconds: float | None = None,
+) -> SpeakerProfile:
     """Remember a voice, adding to the person if they are already known.
 
     Vectors are appended rather than averaged. The same person over a lapel mic
@@ -242,9 +299,10 @@ def enroll(name: str, vector, *, seconds: float, source: str = "") -> SpeakerPro
         raise VoiceprintError(
             "There is not enough of this speaker's voice to recognise them later."
         )
-    if seconds < MIN_ENROLL_SECONDS:
+    minimum = MIN_ENROLL_SECONDS if minimum_seconds is None else float(minimum_seconds)
+    if seconds < minimum:
         raise VoiceprintError(
-            f"Enrolling needs about {MIN_ENROLL_SECONDS:.0f} seconds of one person "
+            f"Enrolling needs about {minimum:.0f} seconds of one person "
             f"speaking; this stretch has {seconds:.0f}."
         )
     arr = np.asarray(vector, dtype=np.float64).ravel()
@@ -340,8 +398,21 @@ def identify(
     vectors: dict[str, np.ndarray],
     seconds: dict[str, float] | None = None,
     profiles: list[SpeakerProfile] | None = None,
+    *,
+    threshold: float | None = None,
+    margin: float | None = None,
+    min_speech: float | None = None,
 ) -> list[Match]:
-    """Name what can be named, and say why for everything else."""
+    """Name what can be named, and say why for everything else.
+
+    The three bounds are arguments rather than fixed values because the right
+    numbers depend on the microphones and the room, and the only way to find
+    them is to look at scores from real recordings. They default to the
+    constants above, which are a starting point, not an answer.
+    """
+    threshold = MATCH_THRESHOLD if threshold is None else float(threshold)
+    margin = MATCH_MARGIN if margin is None else float(margin)
+    min_speech = MIN_SPEECH_SECONDS if min_speech is None else float(min_speech)
     seconds = seconds or {}
     if profiles is None:
         profiles = load_profiles()
@@ -361,7 +432,7 @@ def identify(
     considered = {
         label: normalize(vector)
         for label, vector in vectors.items()
-        if is_usable(vector) and seconds.get(label, 0.0) >= MIN_SPEECH_SECONDS
+        if is_usable(vector) and seconds.get(label, 0.0) >= min_speech
     }
     by_label = {m.label: m for m in matches}
     for match in matches:
@@ -387,10 +458,10 @@ def identify(
         match.score = float(row[column])
         others = np.delete(row, column)
         match.runner_up = float(others.max()) if others.size else 0.0
-        if match.score < MATCH_THRESHOLD:
+        if match.score < threshold:
             match.reason = f"closest match only {match.score:.2f}"
             continue
-        if match.score - match.runner_up < MATCH_MARGIN:
+        if match.score - match.runner_up < margin:
             # Two enrolled people fit about equally well, so the cluster
             # resembles a kind of voice rather than one person.
             match.reason = (
@@ -417,3 +488,150 @@ def describe(matches: list[Match]) -> list[str]:
             + ", ".join(f"{m.label} — {m.reason}" for m in unnamed)
         )
     return lines
+
+
+# ---- the match log ---------------------------------------------------
+#: Every recognition attempt, appended as it happens. This exists because the
+#: thresholds above were reasoned about rather than measured: they were derived
+#: from how pyannote clusters speakers *within* one recording, which is a
+#: different problem from recognising someone across months and microphones.
+#: The only way to know the right numbers for a particular set of people and
+#: rooms is to look at what the scores actually came out as, so every score is
+#: written down — including, especially, the ones that were rejected.
+#: Derived on each call rather than bound at import. A module-level constant
+#: built from PROFILE_DIR keeps pointing at the real app directory after a test
+#: redirects PROFILE_DIR, so the tests write their fixtures into the user's own
+#: history. One place to redirect, not two.
+MATCH_LOG_NAME = "match_log.jsonl"
+#: Enough history to see a pattern, not so much that the file becomes a burden.
+MATCH_LOG_KEEP = 500
+
+
+def match_log_path() -> Path:
+    return PROFILE_DIR / MATCH_LOG_NAME
+
+
+@dataclass
+class LoggedMatch:
+    """One recognition attempt, as it happened."""
+
+    when: float
+    source: str             # the recording it came from
+    label: str              # the diarization label, e.g. SPEAKER_00
+    name: str               # who it was decided to be, "" if nobody
+    score: float
+    runner_up: float
+    seconds: float
+    reason: str
+
+    @property
+    def named(self) -> bool:
+        return bool(self.name)
+
+
+def record_matches(matches: list[Match], source: str = "") -> None:
+    """Write down what was recognised and what was not.
+
+    Never raises. A log that cannot be written is not a reason to fail a
+    transcription — it only costs the ability to tune later.
+    """
+    if not matches:
+        return
+    try:
+        match_log_path().parent.mkdir(parents=True, exist_ok=True)
+        with match_log_path().open("a", encoding="utf-8") as fh:
+            for match in matches:
+                fh.write(json.dumps({
+                    "when": time.time(),
+                    "source": source,
+                    "label": match.label,
+                    "name": match.name,
+                    "score": round(float(match.score), 4),
+                    "runner_up": round(float(match.runner_up), 4),
+                    "seconds": round(float(match.seconds), 1),
+                    "reason": match.reason,
+                }, ensure_ascii=False) + "\n")
+    except OSError:
+        return
+
+
+def load_match_log(limit: int = MATCH_LOG_KEEP) -> list[LoggedMatch]:
+    """The most recent attempts, newest first. Unreadable lines are skipped."""
+    path = match_log_path()
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out: list[LoggedMatch] = []
+    for line in reversed(lines):
+        if len(out) >= limit:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            out.append(LoggedMatch(
+                when=float(data.get("when") or 0.0),
+                source=str(data.get("source") or ""),
+                label=str(data.get("label") or ""),
+                name=str(data.get("name") or ""),
+                score=float(data.get("score") or 0.0),
+                runner_up=float(data.get("runner_up") or 0.0),
+                seconds=float(data.get("seconds") or 0.0),
+                reason=str(data.get("reason") or ""),
+            ))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def clear_match_log() -> None:
+    try:
+        match_log_path().unlink()
+    except OSError:
+        pass
+
+
+def suggest_threshold(entries: list[LoggedMatch]) -> str:
+    """What the recorded scores say about where the bar should sit.
+
+    Deliberately a sentence rather than a number the app applies itself. The
+    log cannot tell a correct match from a confident wrong one — only the
+    person who was in the room can — so this points at the evidence and leaves
+    the decision where it belongs.
+    """
+    scored = [e for e in entries if e.score > 0.0]
+    if len(scored) < 5:
+        return (
+            "Not enough recordings yet to say. The scores collect here as you "
+            "transcribe; come back once there are a few."
+        )
+    named = [e.score for e in scored if e.named]
+    rejected = [e.score for e in scored if not e.named and "closest match" in e.reason]
+    parts: list[str] = []
+    if named:
+        parts.append(f"recognised: {min(named):.2f}–{max(named):.2f}")
+    if rejected:
+        parts.append(f"turned away: up to {max(rejected):.2f}")
+    if not named and rejected:
+        return (
+            f"Nothing has been recognised yet ({', '.join(parts)}). If those "
+            "were people you had enrolled, the bar is too high."
+        )
+    if named and rejected and max(rejected) >= min(named) - 0.05:
+        return (
+            f"Scores overlap ({', '.join(parts)}) — accepted and rejected "
+            "voices are scoring alike, so raising the bar will start losing "
+            "real matches. A second enrolment of the people involved, from the "
+            "microphone that keeps failing, will help more than tuning."
+        )
+    if named and rejected:
+        gap_low, gap_high = max(rejected), min(named)
+        return (
+            f"Clean separation ({', '.join(parts)}): anything between "
+            f"{gap_low:.2f} and {gap_high:.2f} would sort these the same way."
+        )
+    return f"So far: {', '.join(parts)}. Nothing has been turned away yet."

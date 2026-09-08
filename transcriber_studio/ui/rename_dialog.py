@@ -26,17 +26,24 @@ from ..models import TranscriptResult
 from .theme import SheetDialog
 
 
-def _too_short_note(seconds: float) -> str:
+def _too_short_note(seconds: float, minimum: float) -> str:
     """Why a speaker cannot be remembered, in the reader's terms."""
     return (
         f"only {seconds:.0f}s of speech — "
-        f"{voiceprints.MIN_ENROLL_SECONDS:.0f}s needed to remember a voice"
+        f"{minimum:.0f}s needed to remember a voice"
     )
 
 
 class SpeakerRenameDialog(SheetDialog):
-    def __init__(self, result: TranscriptResult, parent=None):
+    def __init__(self, result: TranscriptResult, parent=None, settings=None):
         super().__init__(parent)
+        # The minimum lives in Settings so the Speakers dialog can move it;
+        # None keeps the module default for callers that have no settings.
+        self.min_enroll = (
+            float(settings.voiceprint_min_enroll_s)
+            if settings is not None
+            else voiceprints.MIN_ENROLL_SECONDS
+        )
         self.setWindowTitle(f"Rename speakers — {result.recording.display_name}")
         self.setMinimumWidth(520)
         self.transcript = result
@@ -94,9 +101,9 @@ class SpeakerRenameDialog(SheetDialog):
                 "This recording has no voice data for the speaker — cloud "
                 "engines do not provide any, and neither do older results."
             )
-        elif seconds < voiceprints.MIN_ENROLL_SECONDS:
+        elif seconds < self.min_enroll:
             box.setEnabled(False)
-            box.setToolTip(_too_short_note(seconds))
+            box.setToolTip(_too_short_note(seconds, self.min_enroll))
         else:
             # Whether this is a new person or another sample of a known one
             # depends on the name being typed, so the hint follows the field.
@@ -165,6 +172,7 @@ class SpeakerRenameDialog(SheetDialog):
                     vector,
                     seconds=float(self.transcript.speaker_seconds.get(speaker, 0.0)),
                     source=self.transcript.recording.display_name,
+                    minimum_seconds=self.min_enroll,
                 )
             except Exception as e:
                 if log:

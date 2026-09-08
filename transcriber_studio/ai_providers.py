@@ -569,6 +569,45 @@ def _chat_anthropic(
     return text
 
 
+#: Gemini models that spend part of their output budget "thinking" before they
+#: answer. On a cleanup batch that thinking measured 15,728 tokens against a
+#: 16,384 budget, leaving 656 for the answer — which truncated mid-JSON, failed
+#: to parse, and was mistaken for a batch too large, so the batch was halved and
+#: the whole thing paid for again. Cleanup is mechanical restructuring against a
+#: fixed schema, not a task that benefits from deliberation, so it is turned off.
+THINKING_MODEL_MARKERS = ("2.5", "3.0", "-latest", "gemini-3", "thinking")
+
+
+def google_supports_thinking_config(model: str) -> bool:
+    name = model.lower()
+    return any(marker in name for marker in THINKING_MODEL_MARKERS)
+
+
+def _google_finish_error(candidate: dict, model: str) -> str | None:
+    """A finish reason the caller has to know about, in words it acts on.
+
+    Gemini answers HTTP 200 with a truncated body when it runs out of output
+    budget. Without this the caller sees only unparseable JSON and treats it as
+    a malformed answer, which is the one diagnosis that leads away from the
+    actual cause.
+    """
+    reason = str(candidate.get("finishReason") or "").upper()
+    if reason in ("", "STOP"):
+        return None
+    if reason == "MAX_TOKENS":
+        # Worded to contain the marker the cleanup retry logic looks for, so a
+        # genuine overflow still gets the batch split.
+        return (
+            f"finish_reason=max_tokens — {model} ran out of output budget before "
+            "it finished the JSON, so the answer is cut off."
+        )
+    if reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
+        return f"Gemini stopped on a content filter ({reason})."
+    if reason == "RECITATION":
+        return "Gemini stopped because the answer looked like recited material."
+    return f"Gemini stopped early ({reason})."
+
+
 def _chat_google(
     *,
     settings: Settings,
@@ -599,12 +638,18 @@ def _chat_google(
     }
     if not profile.omit_temperature:
         body["generationConfig"]["temperature"] = profile.temperature
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent",
-        params={"key": _key(settings, "google")},
-        json=body,
-        timeout=timeout,
-    )
+    wants_no_thinking = google_supports_thinking_config(model)
+    if wants_no_thinking:
+        body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent"
+    params = {"key": _key(settings, "google")}
+    r = requests.post(url, params=params, json=body, timeout=timeout)
+    if r.status_code == 400 and wants_no_thinking and "thinking" in (r.text or "").lower():
+        # An older model that does not take the field. Ask again without it
+        # rather than fail over a request for less work.
+        body["generationConfig"].pop("thinkingConfig", None)
+        r = requests.post(url, params=params, json=body, timeout=timeout)
     if not r.ok:
         raise ProviderError(_http_error_text(r))
     data = r.json()
@@ -614,6 +659,11 @@ def _chat_google(
         raise ProviderError("Gemini returned no candidates.")
     parts = candidates[0].get("content", {}).get("parts", [])
     text = "".join(p.get("text", "") for p in parts).strip()
+    # Checked after the text is gathered, so a truncated answer is reported as
+    # truncated rather than as whatever the half-formed JSON happens to break on.
+    problem = _google_finish_error(candidates[0], model)
+    if problem:
+        raise ProviderError(problem)
     if not text:
         raise ProviderError("Gemini returned an empty response.")
     return text

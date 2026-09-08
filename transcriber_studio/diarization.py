@@ -454,3 +454,29 @@ def assign_speaker(start: float, end: float, turns: list[SpeakerTurn]) -> str | 
         if overlap > best_overlap:
             best_overlap, best = overlap, t.speaker
     return best
+
+
+#: How far from any speaker turn a word may sit and still be given that turn's
+#: speaker. Pauses between clauses are a second or two; a gap wider than this
+#: is more likely a stretch pyannote decided nobody was speaking through.
+NEAREST_TURN_SECONDS = 2.0
+
+
+def nearest_speaker(
+    start: float, end: float, turns: list[SpeakerTurn],
+    within: float = NEAREST_TURN_SECONDS,
+) -> str | None:
+    """The speaker of the closest turn, for a span that overlaps none.
+
+    Diarization turns are cut at speech; a word timed inside a breath between
+    two clauses can fall in the gap and overlap nothing. Left unassigned it
+    becomes a speakerless fragment that splits its own sentence in two — a
+    one-speaker clip came back as five segments, two of them attributed to
+    nobody. The word was spoken by whoever was speaking on either side of it.
+    """
+    best, best_gap = None, within
+    for t in turns:
+        gap = max(0.0, t.start - end, start - t.end)
+        if gap <= best_gap:
+            best_gap, best = gap, t.speaker
+    return best

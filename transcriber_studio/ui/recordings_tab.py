@@ -26,6 +26,7 @@ from ..audio_cache import attach_if_cached, audio_status_label
 from ..config import Settings
 from ..models import Recording, Source
 from ..workers import ListWorker, RenameWorker
+from .flow_layout import make_flow_row
 from .theme import qcolor
 
 COLS = ["", "Name", "Date", "Duration", "Audio", "Status"]
@@ -46,6 +47,7 @@ STATE_ROLES = {
     history.RUNNING: "info",
     history.QUEUED: "muted",
     history.CANCELLED: "muted",
+    history.INTERRUPTED: "warn",
 }
 
 
@@ -70,6 +72,7 @@ class RecordingsTab(QWidget):
         self._worker: ListWorker | None = None
         self._recordings: list[Recording] = []
         self._rename_workers: dict[str, RenameWorker] = {}
+        self._live_lists: set = set()
 
         root = QVBoxLayout(self)
 
@@ -105,15 +108,22 @@ class RecordingsTab(QWidget):
         self.page_spin = QSpinBox(); self.page_spin.setRange(1, 9999); self.page_spin.setValue(1)
         self.next_btn = QPushButton("Next ›")
         self.status = QLabel("Not loaded.")
-        page_row.addWidget(self.select_all)
-        page_row.addWidget(self.select_none)
+        # Counts and cache notes; it can shrink rather than hold the pane open.
+        self.status.setMinimumWidth(0)
+        self.status.setWordWrap(True)
+        # Two wrapping groups rather than one fixed row: seven controls side by
+        # side were most of the reason this pane could not be made narrower.
+        selection_group = QWidget()
+        selection_group.setLayout(make_flow_row([self.select_all, self.select_none]))
+        paging_group = QWidget()
+        paging_group.setLayout(
+            make_flow_row([self.prev_btn, QLabel("Page"), self.page_spin, self.next_btn])
+        )
+        page_row.addWidget(selection_group)
         page_row.addStretch()
         page_row.addWidget(self.status)
         page_row.addStretch()
-        page_row.addWidget(self.prev_btn)
-        page_row.addWidget(QLabel("Page"))
-        page_row.addWidget(self.page_spin)
-        page_row.addWidget(self.next_btn)
+        page_row.addWidget(paging_group)
         root.addLayout(page_row)
 
         self.table.cellChanged.connect(self._on_cell_changed)
@@ -195,6 +205,13 @@ class RecordingsTab(QWidget):
         self.refresh_btn.setEnabled(False)
         kw = self.search_edit.text().strip()
         page = self.page_spin.value()
+        # Held until it finishes: a second Refresh used to overwrite the
+        # attribute holding the first, and a QThread collected while running
+        # aborts the process rather than raising.
+        previous = self._worker
+        if previous is not None and previous.isRunning():
+            self._live_lists.add(previous)
+            previous.finished.connect(lambda w=previous: self._live_lists.discard(w))
         self._worker = ListWorker(mode, self.s, page=page, keyword=kw)
         self._worker.done.connect(self._on_loaded)
         self._worker.error.connect(self._on_error)

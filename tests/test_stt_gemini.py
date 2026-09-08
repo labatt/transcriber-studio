@@ -174,16 +174,37 @@ def test_speakers_also_lower_it():
     assert g.length_ceiling(config) == g.PRACTICAL_MINUTES_WITH_FEATURES
 
 
-def test_the_ceiling_is_the_measured_one_not_the_documented_one():
-    """Google documents 30 minutes and does not enforce it.
+def test_the_ceiling_is_what_comes_back_sane_not_what_is_accepted():
+    """The API accepts up to about 54 minutes with speakers and word timings
+    (35, 46, 51 and 54 were accepted; 57 and 80 refused). Scored against
+    reference transcripts, though, only requests of 30 minutes or less came
+    back with sane timings: a 33-minute part and a 35.7-minute request had
+    thousands of word timings out of order and a sentence looped 60 times.
+    Accepted is not transcribed. The documented 30 minutes is the ceiling."""
+    assert g.ACCEPTED_MINUTES_WITH_FEATURES > g.MAX_MINUTES_WITH_FEATURES
+    assert g.PRACTICAL_MINUTES_WITH_FEATURES == g.MAX_MINUTES_WITH_FEATURES == 30
 
-    Probed against gemini-3.5-transcribe, verbatim with diarization: 35, 46, 51
-    and 54 minutes were accepted, 57 and 80 were refused with a bare
-    "Invalid input received.". Warning at 30 cried wolf while the real wall
-    arrived as an opaque 400 after the whole file had been uploaded.
-    """
-    assert g.PRACTICAL_MINUTES_WITH_FEATURES > g.MAX_MINUTES_WITH_FEATURES
-    assert 50 <= g.PRACTICAL_MINUTES_WITH_FEATURES <= 56
+
+def test_no_part_is_longer_than_the_ceiling_once_the_lead_in_is_added():
+    """A 66-minute call was cut 30 / 33 / 9: the middle part ran 30 minutes
+    seam to seam plus the 3-minute lead-in, past the ceiling, and that is the
+    part whose transcript fell apart."""
+    from transcriber_studio.audio_utils import part_spans
+
+    spans = part_spans(66.3 * 60, g.UPLOAD_CHUNK_MINUTES * 60, g.OVERLAP_SECONDS, [])
+
+    assert all(end - start <= g.UPLOAD_CHUNK_MINUTES * 60 + 1e-6 for start, _, end in spans)
+    assert spans[0][0] == 0.0
+    assert all(seam - start == g.OVERLAP_SECONDS for start, seam, _ in spans[1:])
+    # The parts still tile the recording: each seam is where the last one ended.
+    assert all(spans[i][2] == spans[i + 1][1] for i in range(len(spans) - 1))
+    assert spans[-1][2] == 66.3 * 60
+
+
+def test_without_a_lead_in_the_target_is_used_as_is():
+    from transcriber_studio.audio_utils import part_spans
+
+    assert part_spans(5400, 1800, 0.0, []) == [(0.0, 0.0, 1800), (1800, 1800, 3600), (3600, 3600, 5400)]
 
 
 def test_a_recording_over_the_ceiling_goes_through_in_parts():
@@ -329,3 +350,120 @@ def test_two_voices_cannot_both_claim_the_same_speaker():
 
     assert len(set(bridge.values())) == len(bridge), f"two voices merged: {bridge}"
     assert bridge.get("p2:5") == "p1:1"
+
+
+# ---- timings and loops the live model produced ------------------------------
+# Measured on public AMI and Earnings-22 audio: every Gemini run had a few
+# words whose end preceded their start, one started 99,711 s into a 66-minute
+# file, and one earnings call repeated an eight-word phrase 60 times in a row.
+
+
+def _w(text, start, end, speaker="spk:0"):
+    return {"type": "word", "text": text, "start": start, "end": end, "speaker_id": speaker}
+
+
+def test_an_end_before_its_start_is_pulled_up_to_the_start():
+    words = [_w("a", 10.0, 10.5), _w("b", 11.0, 4.0)]
+    assert g.repair_timings(words) == 1
+    assert words[1]["end"] == 11.0
+
+
+def test_a_start_hours_past_the_end_of_the_file_is_clamped():
+    words = [_w("a", 10.0, 10.5), _w("b", 99711.6, 99712.0)]
+    assert g.repair_timings(words, duration=3980.0) == 1
+    assert words[1]["start"] == 10.5 and words[1]["end"] <= 3980.0
+
+
+def test_a_word_that_jumps_minutes_backwards_is_moved_after_its_predecessor():
+    words = [_w("a", 1098.2, 1098.6), _w("b", 122.6, 123.0)]
+    assert g.repair_timings(words) == 1
+    assert words[1]["start"] == 1098.6 and words[1]["end"] == 1098.6
+
+
+def test_a_small_overlap_is_left_alone_because_people_talk_over_each_other():
+    words = [_w("a", 10.0, 11.0), _w("b", 10.6, 11.4, "spk:1")]
+    assert g.repair_timings(words) == 0
+
+
+def test_sane_timings_are_not_touched():
+    words = [_w("a", 0.1, 0.4), _w("b", 0.5, 0.9), _w("c", 2.0, 2.3)]
+    assert g.repair_timings(words, duration=60.0) == 0
+    assert [(w["start"], w["end"]) for w in words] == [(0.1, 0.4), (0.5, 0.9), (2.0, 2.3)]
+
+
+def test_a_phrase_repeated_in_a_loop_is_kept_once():
+    phrase = ["it", "used", "to", "be", "that", "we", "talk", "about"]
+    words = [_w("so", 0, 1)]
+    for k in range(6):
+        for j, t in enumerate(phrase):
+            words.append(_w(t, 10 + k * 8 + j, 10 + k * 8 + j + 0.5))
+    words.append(_w("anyway", 100, 101))
+
+    kept, loops = g.collapse_loops(words)
+
+    assert [w["text"] for w in kept] == ["so", *phrase, "anyway"]
+    assert loops == [(8, 6)]
+
+
+def test_short_repetitions_are_real_speech_and_survive():
+    words = [_w(t, i, i + 0.4) for i, t in enumerate(
+        ["no", "no", "no", "no", "thank", "you", "thank", "you", "thank", "you"]
+    )]
+    kept, loops = g.collapse_loops(words)
+    assert len(kept) == len(words) and loops == []
+
+
+def test_spacing_after_a_dropped_word_goes_with_it():
+    phrase = ["one", "two", "three", "four", "five"]
+    words = []
+    for k in range(3):
+        for j, t in enumerate(phrase):
+            words.append(_w(t, k * 5 + j, k * 5 + j + 0.5))
+            words.append({"type": "spacing", "text": " "})
+    kept, _ = g.collapse_loops(words)
+    assert "".join(w["text"] for w in kept) == "one two three four five "
+
+
+def test_tidy_words_logs_what_it_did():
+    lines = []
+    phrase = ["a", "b", "c", "d", "e"]
+    words = [_w(t, k * 5 + j, k * 5 + j + 0.5) for k in range(3) for j, t in enumerate(phrase)]
+    words.append(_w("late", 3.0, 2.0))
+    g.tidy_words(words, lines.append)
+    assert any("loop" in line for line in lines)
+    assert any("timing" in line for line in lines)
+
+
+def test_tidy_words_is_silent_when_there_is_nothing_to_fix():
+    lines = []
+    g.tidy_words([_w("a", 0, 0.5), _w("b", 0.6, 1.0)], lines.append)
+    assert lines == []
+
+
+def test_one_absurd_start_does_not_drag_the_words_after_it_along():
+    """Live: a start of 99,711 s in part 2 of a 66-minute call. Repairing it by
+    chaining on the previous word stacked the next 3,447 words at that instant."""
+    words = [_w(str(k), 100 + k, 100.5 + k) for k in range(6)]
+    words.insert(3, _w("x", 99711.6, 99711.6))
+    tail_before = [(w["start"], w["end"]) for w in words[4:]]
+
+    repaired = g.repair_timings(words)
+
+    assert repaired == 1
+    assert 102.5 <= words[3]["start"] <= 103.0 and words[3]["end"] <= 103.0
+    assert [(w["start"], w["end"]) for w in words[4:]] == tail_before
+
+
+def test_a_long_looped_sentence_with_punctuation_is_collapsed():
+    """The live loop was seventeen words with commas, repeated 60 times."""
+    sentence = ("I mean, it used to be that we talk about when we had 400 "
+                "warehouses and the average").split()
+    words = [_w("so", 0, 0.5)]
+    t = 1.0
+    for _ in range(4):
+        for tok in sentence:
+            words.append(_w(tok, t, t + 0.3))
+            t += 0.4
+    kept, loops = g.collapse_loops(words)
+    assert [w["text"] for w in kept] == ["so", *sentence]
+    assert loops == [(len(sentence), 4)]

@@ -99,7 +99,7 @@ class Settings:
     # --- engine ---
     # Which speech-to-text engine runs a job: the local Whisper install, or
     # ElevenLabs Scribe in the cloud (which also handles diarization).
-    stt_engine: str = "local"       # local | elevenlabs
+    stt_engine: str = "local"       # local | elevenlabs | gemini | mai
     model: str = "large-v3"
     device: str = "auto"            # auto | cuda | cpu
     compute_type: str = "auto"      # auto | float16 | int8_float16 | int8 | float32
@@ -124,6 +124,25 @@ class Settings:
     # parameters there. Verbatim is the only mode that fills in the app's own
     # data model, and pairs naturally with AI Cleanup for the tidying.
     gemini_mode: str = "verbatim"
+
+    # --- MAI-Transcribe (Azure Speech; key stored locally only) ---
+    # Reached through Azure Speech's fast-transcription endpoint in enhanced
+    # mode. Diarizes in the same call, so pyannote plays no part — and returns
+    # no voice embedding, so voiceprints cannot name anyone on this engine.
+    mai_api_key: str = ""
+    mai_region: str = "eastus"      # only six Azure regions host the model
+    mai_model: str = "MAI-Transcribe-2"
+    # verbatim keeps fillers and false starts; clean is the model's own tidied
+    # output. Verbatim by default, on the same reasoning as CrisperWhisper:
+    # tidying belongs in AI Cleanup, where it can be reviewed.
+    mai_style: str = "verbatim"
+    mai_send_phrases: bool = True   # glossary terms as Azure phrase-list hints
+    # Who separates the speakers. Local pyannote works on any length and gives
+    # voiceprints something to match; MAI's own diarization was measured to
+    # fail at 15 and 30 and 73 minutes alike (a 25-second clip worked),
+    # surfacing as a 408 that looks like a network timeout. Local is the
+    # default for that reason.
+    mai_speakers: str = "local"     # local | mai
 
     # --- channels ---
     channel_mode: str = "downmix"   # downmix | per_channel
@@ -236,6 +255,16 @@ class Settings:
     # them rather than protection to leave running.
     repetition_penalty: float = 1.0     # 1.0 = off
     no_repeat_ngram_size: int = 0       # 0 = off
+
+    # --- speaker recognition (see transcriber_studio.voiceprints) ---
+    # How willing the app is to put an enrolled name on a diarized speaker.
+    # These started as reasoned guesses rather than measurements, so they are
+    # settings: the Speakers dialog shows the scores your own recordings
+    # actually produced, which is the only thing that can settle them.
+    voiceprint_threshold: float = 0.55      # cosine similarity to clear
+    voiceprint_margin: float = 0.10         # how far ahead of the runner-up
+    voiceprint_min_speech_s: float = 15.0   # too brief to recognise below this
+    voiceprint_min_enroll_s: float = 30.0   # too brief to enrol below this
 
     # --- prompt caching (LLM providers that support it) ---
     prompt_cache_enabled: bool = True

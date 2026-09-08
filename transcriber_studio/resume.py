@@ -221,6 +221,10 @@ def transcript_key(recording: Recording, opts: Any) -> str:
         repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
         str(getattr(opts, "hotwords", "")),
         str(getattr(opts, "hallucination_guard", False)),
+        # The cloud decoder's own knobs. Without these a verbatim MAI decode
+        # would be restored for a run that asked for the clean style.
+        str(getattr(opts, "mai_model", "")),
+        str(getattr(opts, "mai_style", "")),
     )
 
 
@@ -247,6 +251,10 @@ def decode_key(recording: Recording, opts: Any) -> str:
         repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
         str(getattr(opts, "hotwords", "")),
         str(getattr(opts, "hallucination_guard", False)),
+        # The cloud decoder's own knobs. Without these a verbatim MAI decode
+        # would be restored for a run that asked for the clean style.
+        str(getattr(opts, "mai_model", "")),
+        str(getattr(opts, "mai_style", "")),
     )
 
 
@@ -310,6 +318,10 @@ def transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
         "model": transcript.model,
         "speakers": list(transcript.speakers),
         "segments": [_segment_to_dict(s) for s in transcript.segments],
+        # Same reason as the queue store: a resumed run should be as enrollable
+        # as one that went straight through.
+        "speaker_embeddings": transcript.speaker_embeddings,
+        "speaker_seconds": transcript.speaker_seconds,
     }
 
 
@@ -317,6 +329,13 @@ def transcript_from_dict(recording: Recording, data: dict[str, Any]) -> Transcri
     return TranscriptResult(
         recording=recording,
         segments=[_segment_from_dict(s) for s in data.get("segments", [])],
+        speaker_embeddings={
+            str(k): [float(x) for x in v]
+            for k, v in (data.get("speaker_embeddings") or {}).items()
+        },
+        speaker_seconds={
+            str(k): float(v) for k, v in (data.get("speaker_seconds") or {}).items()
+        },
         language=data.get("language", ""),
         model=data.get("model", ""),
         speakers=list(data.get("speakers") or []),

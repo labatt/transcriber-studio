@@ -33,7 +33,11 @@ class LocalFilesTab(QWidget):
         self.setAcceptDrops(True)
         root = QVBoxLayout(self)
 
-        root.addWidget(QLabel("Drag audio files here, or use “Add files”. Multiple files supported."))
+        hint = QLabel("Drag audio files here, or use “Add files”. Multiple files supported.")
+        # Without wrapping, this one sentence sets a 816px floor on how narrow
+        # the whole window can be made.
+        hint.setWordWrap(True)
+        root.addWidget(hint)
 
         bar = QHBoxLayout()
         self.add_btn = QPushButton("Add files…")

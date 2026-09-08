@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 
-from . import glossary_store
+from . import glossary, glossary_store
 from .config import Settings
 
 #: Whisper's prompt window is 448 tokens and faster-whisper keeps at most half
@@ -66,8 +66,10 @@ def collect_terms(
     beats what a model extracted, and a name beats a piece of jargon.
     """
     typed = split_terms(settings.bias_extra_terms)
-    people: list[str] = []
-    other: list[str] = []
+    # (term, weight) so each tier can be ordered by how often the term has
+    # actually been seen before the budget starts dropping from the tail.
+    people: list[tuple[str, int]] = []
+    other: list[tuple[str, int]] = []
 
     payloads: list[dict] = list(extra_payloads or [])
     gid = settings.glossary_shared_id if glossary_id is None else (glossary_id or "")
@@ -79,22 +81,45 @@ def collect_terms(
         for speaker in payload.get("speakers") or []:
             name = str(speaker.get("name") or "").strip()
             if name:
-                people.append(name)
+                # A named speaker is someone who was in the room, which is
+                # worth at least as much as a term seen once.
+                people.append((name, glossary.DEFAULT_WEIGHT))
         for term in payload.get("terms") or []:
             canonical = str(term.get("canonical") or "").strip()
             if not canonical:
                 continue
+            weight = glossary.term_weight(term)
             if str(term.get("type") or "").lower() == "person":
-                people.append(canonical)
+                people.append((canonical, weight))
             else:
-                other.append(canonical)
+                other.append((canonical, weight))
 
-    ordered = [*typed, *people, *other]
+    # Weight orders within a tier, not across it: a name still beats a piece of
+    # jargon, because getting a person's name wrong is the error that shows.
+    # What weight settles is which of the names, and which of the jargon.
+    ordered = [*typed, *_heaviest_first(people), *_heaviest_first(other)]
     seen: dict[str, str] = {}
     for term in ordered:
         if _worth_biasing(term):
             seen.setdefault(term.casefold(), term.strip())
     return list(seen.values())
+
+
+def _heaviest_first(weighted: list[tuple[str, int]]) -> list[str]:
+    """Terms ordered by how often they have been seen, then alphabetically.
+
+    The same term can arrive from several glossaries; the heaviest sighting
+    wins rather than the first one read.
+    """
+    best: dict[str, tuple[str, int]] = {}
+    for term, weight in weighted:
+        key = term.casefold()
+        if key not in best or weight > best[key][1]:
+            best[key] = (term, weight)
+    return [
+        term for term, _ in
+        sorted(best.values(), key=lambda item: (-item[1], item[0].lower()))
+    ]
 
 
 def build(terms: list[str], max_chars: int) -> str:

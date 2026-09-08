@@ -19,6 +19,7 @@ from typing import Any
 
 import requests
 
+from . import uploads
 from .job_cancel import ShouldCancel, check_cancel
 from .models import Recording, Segment, TranscriptResult
 
@@ -32,6 +33,10 @@ DEFAULT_MODEL = "scribe_v1"
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024      # 5 GB, per the API docs
 MAX_SPEAKERS = 32
 
+#: Only the connection itself. The upload budget comes from the file size,
+#: because requests applies this value to the whole request body — a 5 GB
+#: allowance on a 30 second write timeout was never going to hold. See
+#: transcriber_studio.uploads.
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 1800         # a long recording can take minutes to come back
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -134,7 +139,7 @@ def _post(audio_path: str, api_key: str, fields: dict[str, str], log, should_can
                     headers=_headers(api_key),
                     files={"file": (path.name, fh, "application/octet-stream")},
                     data=fields,
-                    timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                    timeout=uploads.timeout_for(path, READ_TIMEOUT),
                 )
         except requests.RequestException as e:
             last_error = f"Could not reach ElevenLabs: {e}"

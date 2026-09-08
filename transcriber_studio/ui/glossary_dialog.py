@@ -42,13 +42,22 @@ from PySide6.QtWidgets import (
 )
 
 from .. import glossary_merge, glossary_store
+from ..glossary import WEIGHT_KEY, term_weight
 from ..glossary_merge import Part
 from ..glossary_store import SharedGlossary
 from .theme import SheetDialog, muted_small, qcolor
 
 # Editable columns, then the read-only conflict column the merges write.
-TERM_COLS = ["Term", "Type", "Variants (comma separated)", "Needs review"]
-TERM_FIELDS = [("canonical", "text"), ("type", "text"), ("variants", "list")]
+TERM_COLS = ["Term", "Seen", "Type", "Variants (comma separated)", "Needs review"]
+TERM_FIELDS = [
+    ("canonical", "text"),
+    # How many times this term has been seen. Editable, because a term the user
+    # cares about should be promotable by hand — the budgets drop from the tail
+    # and this is the column that decides the tail.
+    (WEIGHT_KEY, "int"),
+    ("type", "text"),
+    ("variants", "list"),
+]
 SPEAKER_COLS = ["Label", "Name", "Role", "Needs review"]
 SPEAKER_FIELDS = [("label", "text"), ("name", "text"), ("role", "text")]
 # Hand-entered speakers outrank whatever a single recording guessed, which is
@@ -90,6 +99,12 @@ class _EntryTable(QWidget):
         self._fields = fields
         self._defaults = dict(defaults or {})
         self._conflict_col = len(columns) - 1
+        # The columns that can settle a disagreement: the plain-text ones that
+        # say what this entry *is*. A weight is a count of sightings, not a
+        # statement about the term, so editing it resolves nothing.
+        self._resolving_cols = [
+            col for col, (_key, kind) in enumerate(fields) if kind == "text"
+        ][:2]
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -153,6 +168,13 @@ class _EntryTable(QWidget):
                 value = self._text(row, col)
                 if kind == "list":
                     entry[key] = [v.strip() for v in value.split(",") if v.strip()]
+                elif kind == "int":
+                    # A cell someone has typed prose into keeps the stored
+                    # number rather than becoming zero and sinking the term.
+                    try:
+                        entry[key] = max(1, int(float(value)))
+                    except (TypeError, ValueError):
+                        entry[key] = stored.get(key, 1)
                 else:
                     entry[key] = value
             collected.append(entry)
@@ -199,9 +221,18 @@ class _EntryTable(QWidget):
             value = entry.get(key)
             if kind == "list":
                 text = ", ".join(str(v) for v in (value or []))
+            elif kind == "int":
+                # A blank here would read as "never seen", which no stored term
+                # is; one is the floor everywhere else too.
+                text = str(term_weight(entry))
             else:
                 text = "" if value is None else str(value)
-            self.table.setItem(row, col, QTableWidgetItem(text))
+            item = QTableWidgetItem(text)
+            if kind == "int":
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            self.table.setItem(row, col, item)
         self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, dict(entry))
         note = QTableWidgetItem(glossary_merge.describe(entry))
         note.setFlags(note.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -231,9 +262,11 @@ class _EntryTable(QWidget):
             self.table.blockSignals(False)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
-        # Editing what the sources disagreed about — the first or second column
-        # — IS the resolution, so the tag goes with it.
-        if item.column() <= 1 and self._conflict_at(item.row()):
+        # Editing what the sources disagreed about IS the resolution, so the
+        # tag goes with it. Worked out from the field names rather than counted
+        # from the left: adding the "Seen" column shifted the positions, which
+        # silently moved this onto the wrong cells.
+        if item.column() in self._resolving_cols and self._conflict_at(item.row()):
             self._clear_tag(item.row())
             self._refresh_conflict_state()
         self.changed.emit()
@@ -503,7 +536,9 @@ class GlossaryLibraryDialog(SheetDialog):
         if self._current is None:
             return
         self._current.terms = sorted(
-            self.terms.entries(), key=lambda t: str(t.get("canonical", "")).lower()
+            self.terms.entries(), key=lambda t: (
+                -term_weight(t), str(t.get("canonical", "")).lower()
+            )
         )
         self._current.speakers = sorted(
             self.speakers.entries(), key=lambda s: str(s.get("label", "")).lower()

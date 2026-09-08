@@ -36,6 +36,10 @@ classifiers = [
 dependencies = [
     "PySide6>=6.6",
     "requests>=2.31",
+    # Streaming multipart uploads. `requests` reads a whole file into memory
+    # for files= and offers no progress, which on a 140 MB recording means
+    # fifteen silent minutes and 140 MB of RAM.
+    "requests-toolbelt>=1.0",
     "soundfile>=0.12",
 ]
 

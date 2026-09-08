@@ -18,6 +18,7 @@ from . import (
     diarization,
     stt_elevenlabs,
     stt_gemini,
+    stt_mai,
     vocab_bias,
     whisper_models,
 )
@@ -30,14 +31,24 @@ from .word_segments import words_to_segments
 ENGINE_LOCAL = "local"
 ENGINE_ELEVENLABS = "elevenlabs"
 ENGINE_GEMINI = "gemini"
+ENGINE_MAI = "mai"
 ENGINE_LABELS = {
     ENGINE_LOCAL: "Local Whisper (faster-whisper)",
     ENGINE_ELEVENLABS: "ElevenLabs Scribe (cloud)",
     ENGINE_GEMINI: "Gemini 3.5 Transcribe (cloud)",
+    ENGINE_MAI: "MAI-Transcribe (Azure, cloud)",
 }
 #: Engines that transcribe and separate speakers in one pass, so pyannote and
-#: the HuggingFace token play no part.
-CLOUD_ENGINES = (ENGINE_ELEVENLABS, ENGINE_GEMINI)
+#: the HuggingFace token play no part. None of them return a voice embedding
+#: either, so an enrolled voiceprint cannot name anyone on these paths - with
+#: one exception: MAI can be run as a decoder only, with pyannote separating
+#: the speakers locally, and then voiceprints work as they do for Whisper.
+CLOUD_ENGINES = (ENGINE_ELEVENLABS, ENGINE_GEMINI, ENGINE_MAI)
+
+
+def mai_decodes_locally(opts: TranscribeOptions) -> bool:
+    """MAI for the words, pyannote for the speakers."""
+    return opts.engine == ENGINE_MAI and (opts.mai_speakers or "local") == "local"
 
 
 @dataclass
@@ -65,6 +76,10 @@ class TranscribeOptions:
     hotwords: str = ""
     hallucination_guard: bool = True
     hallucination_silence_s: float = 2.0
+    # --- how willing to put an enrolled name on a diarized speaker ---
+    voiceprint_threshold: float = 0.55
+    voiceprint_margin: float = 0.10
+    voiceprint_min_speech_s: float = 15.0
     #: Penalty applied to tokens the decoder has already emitted. 1.0 is off,
     #: and off is the library default. The guard above stops a hallucination
     #: *carrying over* between windows; neither it nor the VAD does anything
@@ -84,6 +99,26 @@ class TranscribeOptions:
     gemini_api_key: str = ""        # the Google AI key, shared with AI Cleanup
     gemini_model: str = ""
     gemini_mode: str = ""           # smart | verbatim
+    # --- MAI-Transcribe (Azure Speech, enhanced mode) ---
+    mai_api_key: str = ""
+    mai_region: str = "eastus"      # only six regions host the model
+    mai_model: str = ""             # blank => stt_mai.DEFAULT_MODEL
+    mai_style: str = "verbatim"     # verbatim | clean
+    #: Send the glossary and vocab-bias terms as Azure phrase-list hints.
+    mai_send_phrases: bool = True
+    #: Who separates the speakers. "local" runs pyannote here on MAI's words,
+    #: which works at any length and returns the embeddings voiceprints need.
+    #: "mai" asks Azure to do it in the same request - measured to fail at
+    #: 15 minutes and above, with an error that reads like a network timeout.
+    mai_speakers: str = "local"     # local | mai
+
+
+def _cloud_model_id(opts: TranscribeOptions) -> str:
+    """Whichever model field belongs to the engine in use."""
+    return {
+        ENGINE_GEMINI: opts.gemini_model,
+        ENGINE_MAI: opts.mai_model,
+    }.get(opts.engine, opts.elevenlabs_model)
 
 
 def faster_whisper_available() -> bool:
@@ -306,6 +341,16 @@ class Transcriber:
                 log_cb(msg)
 
         check_cancel(should_cancel, log, message="Cancelled.")
+        if mai_decodes_locally(opts):
+            # The local pipeline with MAI standing in for Whisper: no model to
+            # load, and the speaker stage that follows is pyannote's.
+            for line in pipeline_summary(opts):
+                log(line)
+            log("MAI-Transcribe decodes the words; speakers are detected here.")
+            return self._transcribe_single(
+                recording, audio_path, None, None, opts, progress_cb, log,
+                should_cancel, resume, decoder=stt_mai.decode,
+            )
         if opts.engine in CLOUD_ENGINES:
             return self._transcribe_cloud(
                 recording, audio_path, opts, progress_cb, log, should_cancel
@@ -346,8 +391,11 @@ class Transcriber:
 
     # ---- cloud engines -------------------------------------------------
     def _cloud_engine(self, engine: str):
-        """The module for a cloud engine. Both expose the same transcribe()."""
-        return stt_gemini if engine == ENGINE_GEMINI else stt_elevenlabs
+        """The module for a cloud engine. They all expose the same transcribe()."""
+        return {
+            ENGINE_GEMINI: stt_gemini,
+            ENGINE_MAI: stt_mai,
+        }.get(engine, stt_elevenlabs)
 
     def _transcribe_cloud(
         self, recording, audio_path, opts, progress_cb, log, should_cancel,
@@ -392,10 +440,7 @@ class Transcriber:
             recording=recording,
             segments=all_segments,
             language=language,
-            model=engine.model_label(
-                (opts.gemini_model if opts.engine == ENGINE_GEMINI
-                 else opts.elevenlabs_model) or engine.DEFAULT_MODEL
-            ),
+            model=engine.model_label(_cloud_model_id(opts) or engine.DEFAULT_MODEL),
             speakers=speakers,
         )
 
@@ -452,7 +497,7 @@ class Transcriber:
 
     def _transcribe_single(
         self, recording, audio_path, model, language, opts, progress_cb, log,
-        should_cancel: ShouldCancel = None, resume=None,
+        should_cancel: ShouldCancel = None, resume=None, decoder=None,
     ):
         # A disabled log rather than an `if resume:` around every use of it.
         bank = resume if resume is not None else resume_store.ResumeLog(None)
@@ -460,7 +505,7 @@ class Transcriber:
 
         segments, detected_lang, words = self._decode_or_restore(
             bank, decode_key, recording, audio_path, model, language, opts,
-            progress_cb, log, should_cancel,
+            progress_cb, log, should_cancel, decoder=decoder,
         )
 
         speakers_order: list[str] = []
@@ -493,7 +538,13 @@ class Transcriber:
                     log_cb=log,
                     should_cancel=should_cancel,
                 )
-                names = self._recognized_names(diarized, log)
+                names = self._recognized_names(
+                    diarized, log,
+                    threshold=opts.voiceprint_threshold,
+                    margin=opts.voiceprint_margin,
+                    min_speech=opts.voiceprint_min_speech_s,
+                    source=recording.display_name,
+                )
                 segments, speakers_order = self._apply_speakers(
                     segments, words, diarized, log, names
                 )
@@ -514,16 +565,24 @@ class Transcriber:
         return TranscriptResult(
             recording=recording, segments=segments,
             language=detected_lang or (language or ""),
-            model=opts.model, speakers=speakers_order,
+            model=(
+                stt_mai.model_label(opts.mai_model) if decoder is not None else opts.model
+            ),
+            speakers=speakers_order,
             speaker_embeddings=speaker_vectors,
             speaker_seconds=speaker_seconds,
         )
 
     def _decode_or_restore(
         self, bank, key, recording, audio_path, model, language, opts,
-        progress_cb, log, should_cancel,
+        progress_cb, log, should_cancel, decoder=None,
     ):
-        """The Whisper pass, reused from an interrupted run where possible."""
+        """The decode pass, reused from an interrupted run where possible.
+
+        ``decoder`` swaps Whisper for another source of the same
+        ``(segments, language, words)`` triple - MAI-Transcribe, today - so a
+        cloud decode gets banked and restored exactly as a local one does.
+        """
         saved = bank.get(key)
         if saved:
             try:
@@ -540,6 +599,10 @@ class Transcriber:
             except Exception as e:
                 log(f"Saved transcription unusable ({e}) — transcribing again.")
 
+        if decoder is not None:
+            return decoder(
+                recording, audio_path, opts, progress_cb, log, should_cancel
+            )
         total_dur = recording.duration_seconds or audio_utils.probe(audio_path)["duration"]
         log("Transcribing audio…")
         return self._run_whisper(
@@ -592,7 +655,15 @@ class Transcriber:
 
         if words:
             for word in words:
+                # Cloud engines interleave spacing entries between words; they
+                # carry no timing and belong to whoever is speaking around them.
+                if word.get("type", "word") != "word" or "start" not in word:
+                    continue
                 raw = diarization.assign_speaker(word["start"], word["end"], turns)
+                if raw is None:
+                    # In a pause between turns: spoken by whoever is nearest,
+                    # not by nobody.
+                    raw = diarization.nearest_speaker(word["start"], word["end"], turns)
                 word["speaker_id"] = raw or ""
             regrouped, speakers = words_to_segments(words, diarized=True, names=names)
             if regrouped:
@@ -607,6 +678,8 @@ class Transcriber:
         mapping = self._stable_speaker_map(turns, names)
         for seg in segments:
             raw = diarization.assign_speaker(seg.start, seg.end, turns)
+            if raw is None:
+                raw = diarization.nearest_speaker(seg.start, seg.end, turns)
             seg.speaker = mapping.get(raw) if raw else None
         return segments, list(dict.fromkeys(s.speaker for s in segments if s.speaker))
 
@@ -638,12 +711,18 @@ class Transcriber:
         return vectors, totals
 
     @staticmethod
-    def _recognized_names(diarized, log) -> dict[str, str]:
+    def _recognized_names(
+        diarized, log, *, threshold=None, margin=None, min_speech=None, source="",
+    ) -> dict[str, str]:
         """Which diarized speakers are people this app has been taught.
 
         Never allowed to fail a transcription: an unrecognised speaker is the
         normal case, and a broken voiceprint store should cost names, not the
         transcript.
+
+        Every attempt is written to the match log on the way past — the
+        rejections too, since a threshold can only be judged against the scores
+        it turned away.
         """
         embeddings = getattr(diarized, "embeddings", None)
         if not embeddings:
@@ -652,12 +731,16 @@ class Transcriber:
             from . import voiceprints
 
             matches = voiceprints.identify(
-                {label: vector for label, vector in embeddings.items()},
+                dict(embeddings),
                 diarized.speech_seconds(),
+                threshold=threshold,
+                margin=margin,
+                min_speech=min_speech,
             )
         except Exception as e:
             log(f"Speaker recognition skipped: {e}")
             return {}
+        voiceprints.record_matches(matches, source=source)
         for line in voiceprints.describe(matches):
             log(line)
         return {m.label: m.name for m in matches if m.named}
