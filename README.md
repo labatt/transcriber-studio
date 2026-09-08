@@ -41,9 +41,11 @@ the decoder is told to expect**.
 - [Your first transcription](#your-first-transcription)
 - [Getting better results on hard audio](#getting-better-results-on-hard-audio)
 - [Glossaries](#glossaries)
+- [Speakers and voiceprints](#speakers-and-voiceprints)
 - [AI cleanup](#ai-cleanup)
 - [Keeping it up to date](#keeping-it-up-to-date)
 - [Transcription engines](#transcription-engines)
+- [How the engines compare](#how-the-engines-compare)
 - [Models](#models)
 - [Where your data lives](#where-your-data-lives)
 - [Troubleshooting](#troubleshooting)
@@ -69,17 +71,25 @@ the decoder is told to expect**.
    before it starts guessing at them. The words come from your **shared glossary**, which fills
    itself in as jobs run: what one recording taught the app, the next one already knows.
 
-Then a transcription engine for the words — local Whisper, ElevenLabs Scribe, or
-**Gemini 3.5 Transcribe** — [pyannote](https://github.com/pyannote/pyannote-audio) for who said
-them when the engine does not do that itself, and an optional LLM pass to turn fragments into
-readable prose.
+Then a transcription engine for the words — local Whisper, **MAI-Transcribe-2** (Microsoft, via
+Azure Speech), ElevenLabs Scribe, or **Gemini 3.5 Transcribe** —
+[pyannote](https://github.com/pyannote/pyannote-audio) for who said them when the engine does not
+do that itself, and an optional LLM pass to turn fragments into readable prose.
 
 Every layer reports what it actually did, and says so when it fell back to something weaker —
 there is no configuration that quietly does nothing.
 
 **Also in the box**
 
-- **Shared glossaries** — named vocabularies several jobs read from and write back to.
+- **Shared glossaries** — named vocabularies several jobs read from and write back to. Every time
+  a term is seen again its weight goes up, and the heaviest terms are the ones that get biased
+  first when the list has to be cut to fit the decoder.
+- **Voiceprints** — name a speaker once and tick *Remember this voice*; later recordings come back
+  with the name instead of `Speaker 2`. Works with every engine whose speakers come from pyannote
+  (local Whisper and MAI). Managed from the **Speakers** button in the header.
+- **Rename recordings on the device** — edit a PLAUD recording's name in the list and, if you opt
+  in, the new name is pushed back to your PLAUD account. Output files can be renamed after the fact
+  too.
 - **AI cleanup** — merge fragments into sentences, fix speaker attribution, normalise terms
   against the glossary, and flag anything garbled.
 - **Resume** — an interrupted job restarts from its last saved step. No re-transcription, no
@@ -88,9 +98,12 @@ there is no configuration that quietly does nothing.
   every stage can be cancelled while it runs. The transcription is banked before speaker detection
   begins, so a failure there costs you the labels, not the words. Closing the lid mid-job costs you
   the current chunk, not the job.
-- **No length limit on cloud transcription** — Gemini refuses anything much over 54 minutes, so
-  longer recordings are cut at a pause into 30-minute parts, transcribed separately and stitched
-  back onto one timeline.
+- **No length limit on cloud transcription** — MAI takes a 73-minute recording in one request.
+  Gemini's output falls apart past the documented 30 minutes when speakers or word timings are
+  asked for (the API *accepts* longer, but returns broken timestamps and looped sentences), so
+  longer recordings are cut at a pause into parts of at most 30 minutes, lead-in included,
+  transcribed separately and stitched back onto one timeline. Uploads show progress and are given
+  a timeout sized to the file rather than a fixed one.
 - **Components window** — what's installed, what's newer, and buttons to update it.
 - **Output formats** — `txt`, `srt`, `vtt`, `json`, `md`, with a filename template builder.
 
@@ -159,19 +172,23 @@ too. This is the configuration the app is tuned for.
 
 ### Without a GPU
 
-Everything still works. Four honest options:
+Everything still works. Five honest options:
 
 1. **Local Whisper on CPU** — use `small` (the app recommends it automatically). Expect roughly
    real time to a few times slower: an hour of audio in one to three hours. `large-v3` on CPU is
    possible but usually not worth the wait.
-2. **Gemini 3.5 Transcribe** — a cloud engine that transcribes *and* separates speakers in one
+2. **MAI-Transcribe-2** — the most accurate engine in [our benchmark](#how-the-engines-compare),
+   transcribing a whole recording in one request. Speakers still come from pyannote on your
+   machine, which is the slow part on CPU.
+3. **Gemini 3.5 Transcribe** — a cloud engine that transcribes *and* separates speakers in one
    pass, using the same Google AI key as AI Cleanup. See [the engines](#transcription-engines).
-3. **ElevenLabs Scribe** — the same idea with a different provider and its own key.
-4. **Skip diarization** — it is the most expensive part on CPU. If you only need the words, turn
+4. **ElevenLabs Scribe** — the same idea with a different provider and its own key. The fastest
+   of the four by a wide margin.
+5. **Skip diarization** — it is the most expensive part on CPU. If you only need the words, turn
    speaker detection off.
 
-Both cloud engines mean no local compute and no HuggingFace token, but they cost money and the
-audio leaves your machine.
+The cloud engines mean no local compute, and Gemini and Scribe need no HuggingFace token either,
+but they cost money and the audio leaves your machine.
 
 The denoise and VAD layers are cheap on CPU either way. If you only take one thing from this
 README: **on hard audio, denoise + VAD + biasing on `small` beats `large-v3` on the raw file.**
@@ -352,6 +369,11 @@ Only needed to pull recordings from a PLAUD account; local files work without it
 Then `npm install -g @plaud-ai/cli`. Sign in once — the wizard's PLAUD page does it for you. The
 CLI holds the token, not this app.
 
+PLAUD's public API is read-only. Renaming a recording from inside the app and having the new name
+appear in your PLAUD account uses PLAUD's own web interface instead, and is off unless you turn it
+on in Settings → PLAUD rename and paste a web session token there. Without it, renames stay local
+to the app and are marked as not yet pushed.
+
 ---
 
 ## First run
@@ -378,9 +400,10 @@ Two settings worth doing straight away:
 3. **Turn on the pipeline** (Audio pipeline group): denoise, VAD, biasing. All three are cheap.
 4. **Press Go.** The log reports each layer as it runs — which denoiser, how much non-speech the
    VAD removed, how many vocabulary terms went in, which model and which device.
-5. **When it finishes**, the Output column has a button to open the folder. If speakers were
-   detected, a rename dialog offers to put real names on them — that is what feeds the filename
-   and the glossary.
+5. **When it finishes**, the Output column has buttons to open the folder and to rename the
+   files. If speakers were detected, a rename dialog offers to put real names on them — that is
+   what feeds the filename and the glossary — and a *Remember this voice* box next to each name
+   enrols that speaker so the next recording can name them on its own.
 
 Nothing is written until a job completes, so cancelling leaves no half-made transcript.
 
@@ -422,7 +445,30 @@ disagreed about, delete the row, or press **Keep as is**.
 
 One deliberate asymmetry: terms are shared, the speaker roster is not. A diarization label like
 `SPEAKER_00` means a different person in every recording, so sharing rosters would mislabel the
-next job. Names that a roster *did* resolve travel across as `person` terms instead.
+next job. Names that a roster *did* resolve travel across as `person` terms instead — and the
+people themselves travel as [voiceprints](#speakers-and-voiceprints).
+
+---
+
+## Speakers and voiceprints
+
+pyannote returns a voice embedding for every speaker it separates. The app keeps those. Name a
+speaker in the rename dialog, tick **Remember this voice**, and the embedding is stored as a
+voiceprint under that name. On the next recording, each detected speaker is compared with every
+enrolled voice; a close enough match (and a clear enough margin over the runner-up) puts the name
+on the transcript before you have looked at it.
+
+The **Speakers** button in the header opens the management dialog:
+
+- **Enrolled voices** — who is enrolled, how many samples each has, rename or forget a person, or
+  drop a single bad sample.
+- **Recognition** — the match threshold, the margin, and the minimum speech a speaker needs before
+  a match is attempted; plus a log of every match decision the app has made, with a suggestion for
+  where to set the threshold based on the scores it has seen.
+
+Voiceprints work with every engine whose speakers come from pyannote — local Whisper and MAI.
+ElevenLabs Scribe and Gemini separate speakers themselves and return no voice data, so on those
+engines speakers stay numbered per recording.
 
 ---
 
@@ -464,15 +510,41 @@ yourself instead. Three things it handles that a plain `pip install --upgrade` g
 
 Chosen per run in the Options panel.
 
-| | Runs where | Speakers | Needs |
-| --- | --- | --- | --- |
-| **Local Whisper** | your machine | pyannote, separately | faster-whisper; a HuggingFace token for speakers |
-| **Gemini 3.5 Transcribe** | Google | in the same pass | a Google AI key — the same one AI Cleanup uses |
-| **ElevenLabs Scribe** | ElevenLabs | in the same pass | an ElevenLabs key |
+| | Runs where | Speakers | Vocabulary hints | Needs |
+| --- | --- | --- | --- | --- |
+| **Local Whisper** | your machine | pyannote, separately | hotwords, every window | faster-whisper; a HuggingFace token for speakers |
+| **MAI-Transcribe-2** | Azure | pyannote, separately (see below) | phrase list, 50 terms | an Azure Speech key in one of six regions; a HuggingFace token for speakers |
+| **Gemini 3.5 Transcribe** | Google | in the same pass | none — the API refuses them alongside speakers or timestamps | a Google AI key — the same one AI Cleanup uses |
+| **ElevenLabs Scribe** | ElevenLabs | in the same pass | none | an ElevenLabs key |
 
-Only the local engine gets the [audio pipeline](#what-it-does) in front of it. Denoising still
-applies to all three — the enhanced audio is what gets uploaded — but VAD and vocabulary biasing
-are decoder-side, and the cloud APIs do not expose those controls.
+Only the local engine gets the full [audio pipeline](#what-it-does) in front of it. Denoising
+still applies to every engine — the enhanced audio is what gets uploaded — and the shared glossary
+reaches the two engines that take hints. VAD is decoder-side and stays local. Picking MAI turns
+denoising off for that run and says so: its own front end handles noisy audio, and the file goes
+up untouched.
+
+### MAI-Transcribe-2
+
+Microsoft's speech model, in public preview through Azure Speech's fast transcription endpoint.
+You need an Azure account and a Speech (or Foundry) resource in one of the regions that host the
+model — eastus, westus, westus2, northeurope, southeastasia or centralindia — and its key and
+region go into Settings. The **Test** button there checks both.
+
+It transcribes a whole recording in one request (a 73-minute, 70 MB file went up without
+splitting) and returns word timings. Two of its options matter:
+
+- **Verbatim, not clean.** The *clean* style removes real words, not just fillers — in our
+  benchmark it cost 2 to 5 points of word error rate on every recording. Use verbatim and let AI
+  Cleanup do the tidying, where you can see what changed.
+- **Speakers are detected here, not there.** MAI's own diarization fails on anything much past 15
+  minutes with errors that look like network timeouts (see
+  [docs/mai-transcribe-diarization-issue.md](docs/mai-transcribe-diarization-issue.md), reported
+  to Microsoft). So by default the app uses MAI for the words and pyannote for the speakers,
+  which also means voiceprints work. The setting is there if you want MAI's own diarization on a
+  short clip.
+
+The phrase list it accepts as vocabulary hints is capped at 50 entries, which the documentation
+does not mention; the app sends the 50 heaviest glossary terms and logs how many were left out.
 
 ### Gemini 3.5 Transcribe
 
@@ -491,11 +563,43 @@ Two more constraints worth knowing, both found by asking the API rather than rea
 - **Vocabulary biasing is unavailable here.** Google's `custom_vocabulary` is rejected outright
   alongside either diarization or timestamps, and this app needs both. Terms are not silently
   dropped — the Options panel says so where the setting lives.
-- **Length limits.** Google documents *"Standard unary requests support audio files up to 1 hour"*
-  and *"Audio processing is limited to 30 minutes when features like speaker diarization or
-  word-level timestamps are enabled"*. Since verbatim mode always asks for word timestamps, the
-  30-minute ceiling applies there whether or not speaker detection is on. Longer recordings are
-  still sent — the API is the authority — with a warning in the log first.
+- **Length limits are real even where the API does not enforce them.** Google documents *"Audio
+  processing is limited to 30 minutes when features like speaker diarization or word-level
+  timestamps are enabled"*. The API accepts requests up to about 54 minutes anyway — and past 30
+  it returns word timings out of order, starts hours beyond the end of the file, and sentences
+  repeated dozens of times. Scored against reference transcripts, that was the difference between
+  38 percent and 8 percent word error rate on the same call. So verbatim-mode recordings over 30
+  minutes are cut into parts of at most 30 minutes including the 3-minute lead-in used to match
+  speakers across the join, and any stray timings or decoding loops that remain are repaired and
+  logged. Splitting has a cost of its own: a voice not heard on both sides of a join becomes an
+  extra speaker.
+
+---
+
+## How the engines compare
+
+All four engines were run through this app against five public recordings with human reference
+transcripts — two [AMI Meeting Corpus](https://groups.inf.ed.ac.uk/ami/corpus/) meetings (one of
+them on both a table mic and headsets) and two [Earnings-22](https://github.com/revdotcom/speech-datasets)
+earnings calls — and scored on word error rate, proper-noun recall, speaker attribution and
+diarization error rate.
+
+| Recording | MAI verbatim | Scribe | Gemini | Whisper large-v3 |
+| --- | --- | --- | --- | --- |
+| AMI meeting, table mic, 39 min | **13.7%** | 14.9% | 17.3% | 23.0% |
+| Same meeting, headset mics | **11.8%** | 12.6% | 15.0% | 19.8% |
+| AMI meeting with heavy overlap, 36 min | **26.4%** | 27.4% | 33.4% | 39.3% |
+| Costco earnings call, 66 min | **6.9%** | 7.0% | 7.8% | 11.3% |
+| UK earnings call, 61 min | **8.0%** | 8.2% | 8.5% | 10.1% |
+
+Word error rate, lower is better, after the same normaliser the Open ASR Leaderboard uses. MAI
+was lowest on every recording; Scribe was within a point everywhere and had the best proper-noun
+recall on every file; Whisper's gap on meetings is dropped speech in overlapping stretches, and the
+`turbo` model scores the same as the full one. Full tables, method, and everything that broke on
+the way: [docs/engine-benchmark-results.md](docs/engine-benchmark-results.md),
+[docs/benchmark-issues-log.md](docs/benchmark-issues-log.md), and the write-up in
+[docs/article-stt-engine-benchmark.md](docs/article-stt-engine-benchmark.md). The tooling is in
+`tools/` and runs against any recording with a reference transcript.
 
 ---
 
@@ -509,9 +613,16 @@ Two more constraints worth knowing, both found by asking the API rather than rea
 | `medium` | 769M | ~5 GB | ~2× faster | Good |
 | `large-v2` | 1550M | ~10 GB | baseline | Excellent |
 | `large-v3` | 1550M | ~10 GB | baseline | Best |
+| `large-v3-turbo` | 809M | less than `large-v3` | ~6× faster | Best, or near it — see below |
 | **CrisperWhisper** | 1550M | ~10 GB | about the same | Best (verbatim) |
 
 Speed is relative to `large-v3` on the same machine. Models download from HuggingFace on first use.
+
+`large-v3-turbo` keeps the full encoder and cuts the decoder from 32 layers to four. In
+[our benchmark](#how-the-engines-compare) it scored within two points of `large-v3` on every
+recording and produced the same word counts, so on this app's pipeline it is the default worth
+having. The one place the smaller decoder shows is vocabulary biasing: hotwords act in the decoder,
+so there is less for them to work with.
 
 **[CrisperWhisper](https://huggingface.co/nyralabs/CrisperWhisper)** is a `large-v3` fine-tune that
 transcribes *verbatim* — it keeps the fillers, stutters and false starts stock Whisper quietly tidies
@@ -535,19 +646,23 @@ Everything is local. On Windows, `%APPDATA%\TranscriberStudio`; on Linux
 settings.json      your settings and API keys, in plain text
 queue.json         the job queue, so it survives a restart
 history.json       what was processed and when
+plaud_names.json   names you gave PLAUD recordings, and whether each was pushed to PLAUD
 glossaries/        the shared glossary library
+voiceprints/       enrolled voices (one JSON file of embeddings per person) and the match log
 audio_cache/       downloaded PLAUD audio
 denoise_cache/     enhanced audio, so a re-run does not redo it
-diarization_cache/ detected speaker turns, so a re-run does not redo them
+diarization_cache/ detected speaker turns and voice embeddings, so a re-run does not redo them
 resume/            checkpoints for interrupted jobs
 ```
 
 Transcripts go wherever you point the output folder — never into the app directory.
 
-**What leaves your machine:** nothing, unless you turn it on. Local Whisper, DeepFilterNet, VAD and
-pyannote all run on your hardware. Audio is uploaded only if you choose the ElevenLabs engine.
+**What leaves your machine:** nothing, unless you turn it on. Local Whisper, DeepFilterNet, VAD,
+pyannote and voiceprint matching all run on your hardware. Audio is uploaded only if you choose a
+cloud engine — MAI (Azure), Gemini (Google) or Scribe (ElevenLabs) — and only to that provider.
 Transcript text is sent to an LLM provider only if you enable AI Cleanup, and only to the provider
-you picked. See [SECURITY.md](SECURITY.md) for how keys are stored.
+you picked. A recording's new name is sent to PLAUD only if you opt into pushing renames. See
+[SECURITY.md](SECURITY.md) for how keys are stored.
 
 ---
 
@@ -578,19 +693,40 @@ Usually a CUDA/PyTorch mismatch — check the Components window.
 CUDA channel. The Components window picks a channel that has the release; a hand-written
 `--index-url` may not.
 
+**MAI returns 408 "Timeout", 500 or 503 on a long recording.** That is MAI's own speaker
+diarization failing, not your network: the same file goes through with diarization off. Leave
+*Speakers* set to *local* in the MAI settings, which is the default, and pyannote does the
+separating.
+
+**MAI rejects the request with "Context list cannot have more than 50 items".** The phrase list is
+capped at 50. The app trims to 50 and logs it; if you see this, the app is out of date.
+
+**Gemini repeated a sentence dozens of times, or the timeline is nonsense.** A request went over
+30 minutes with speakers or timestamps on. Current versions split at 30 minutes and repair what is
+left; if you see it, update.
+
+**A PLAUD rename did not reach the device.** Pushing names to PLAUD is opt-in and uses a web
+session token that expires; Settings → PLAUD rename shows whether the token is still good, and
+the name stays in the app either way until it can be pushed.
+
 ---
 
 ## Development
 
 ```powershell
 pip install -e ".[local,dev]"
-pytest                 # 190 tests, no GPU, network or API keys needed
+pytest                 # ~600 tests, no GPU, network or API keys needed
 python -m ruff check .
 ```
 
 Tests run headless and never touch your real settings, glossaries or caches — see
 `tests/support.py` for the isolation helpers. If you add state that lives in the app directory, add
 an isolation helper for it too.
+
+The engine benchmark lives in `tools/`: `engine_bench.py` runs every configured engine over a set
+of recordings through the app's own transcribe path, and `bench_refs.py` builds reference
+transcripts from AMI (NXT) or Earnings-22 (`.nlp`) annotations and scores against them. Both are
+documented in their module docstrings; results and method notes are under `docs/`.
 
 Screenshots in this README are generated from mocked-up data, never from a real install:
 
