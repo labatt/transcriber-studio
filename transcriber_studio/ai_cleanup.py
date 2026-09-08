@@ -73,9 +73,25 @@ CLEANUP_USER_INSTRUCTIONS = (
 
 MAX_RETRIES = 5
 CHARS_PER_TOKEN = 3.5
+#: Model profiles as corrected by a successful send this session, keyed by
+#: (provider, model). The database has them too; this is what later batches in
+#: the same run read, since they are handed the profile loaded before the run.
+_LEARNED_PROFILES: dict[tuple[str, str], ModelProfile] = {}
 OUTPUT_SAFETY = 0.80
 JSON_OVERHEAD_PER_SEGMENT = 32
+#: Per input segment, in the answer. A returned sentence carries about 90
+#: characters of JSON keys and punctuation and covers one or two input
+#: segments, so the per-segment share is roughly half of that.
+OUTPUT_OVERHEAD_PER_SEGMENT = 45
 INPUT_OVERHEAD_PER_SEGMENT = 45
+#: Errors that mean the answer did not fit in the output budget. Nothing about
+#: the request's parameters fixes that; only a smaller batch does.
+TRUNCATION_MARKERS = (
+    "finish_reason=max_tokens",
+    "stop_reason=max_tokens",
+    "finish_reason=length",
+    "truncated json",
+)
 ABSOLUTE_MAX_SEGMENTS_PER_BATCH = 3_000
 RELIABLE_CLEANUP_BATCH_SEGMENTS = 600
 CLEANUP_READ_TIMEOUT_SEC = 600
@@ -290,15 +306,24 @@ def output_token_ceiling(provider: str, model: str) -> int:
             return 64_000
         return 8_192
     if provider == "google":
-        # Gemini's real ceiling is far higher (gemini-flash-latest reports
-        # 65,536), but this number sizes the batches, and a batch is only worth
-        # enlarging if the answer reliably fits. Raised from 8,192 to match what
-        # the profile actually requests, so the two stop disagreeing.
-        return 16_384
+        # gemini-flash-latest reports a 65,536-token output limit. This number
+        # both sizes the batches and is what the request asks for, so it is set
+        # at half the model's limit: enough that an hour-long transcript goes in
+        # two or three batches rather than six, with room under the real ceiling
+        # for an answer that runs longer than the estimate.
+        return 32_768
     if provider in ("openai", "openrouter", "grok"):
         if any(x in m for x in ("o1", "o3", "o4")):
             return 32_768
-        if any(x in m for x in ("gpt-4o", "gpt-4.1", "gpt-5", "gpt-4-")):
+        if "gpt-5" in m or "gpt-6" in m:
+            # OpenAI's model pages for gpt-5.6-sol/terra/luna and gpt-6-astra:
+            # 128,000 max output tokens. Held at 32,768 for the same reason as
+            # Gemini: a batch answer of that size already takes about three
+            # minutes at the rate measured live (~170 tokens/s), and the read
+            # timeout is ten. Doubling it again would trade a fifth batch for a
+            # request that can time out.
+            return 32_768
+        if any(x in m for x in ("gpt-4o", "gpt-4.1", "gpt-4-")):
             return 16_384
         return 16_384
     if provider in ("ollama_cloud", "ollama_local"):
@@ -316,6 +341,12 @@ def input_char_ceiling(provider: str, model: str) -> int:
     if provider in ("openai", "openrouter", "grok"):
         if any(x in m for x in ("128k", "200k", "1m")):
             return 500_000
+        if any(x in m for x in ("gpt-5.6", "gpt-6")):
+            # 1,050,000-token context on OpenAI's model pages (922,000 max
+            # input for luna and sol). Batches are bounded by the answer long
+            # before this matters; the pricing note that prompts past 272K input
+            # tokens cost double never comes into play at these batch sizes.
+            return 900_000
         return 120_000
     if provider in ("ollama_cloud", "ollama_local"):
         # Ollama's window is whatever num_ctx we ask for, so the real limit is
@@ -360,9 +391,17 @@ def _estimate_cleanup_payload_chars(segments: list[Segment]) -> int:
 
 
 def _estimate_segment_output_chars(seg: Segment) -> int:
-    """Merged sentences produce far less JSON than one row per input segment."""
+    """What this segment costs in the answer: its text, near enough in full,
+    plus its share of the JSON around each returned sentence.
+
+    This used to assume a quarter of the text, on the theory that merging
+    fragments into sentences shrinks the output. Merging removes rows, not
+    words: a 503-segment batch came back as 420 sentences carrying the same
+    text, so a 95k-character batch was budgeted at 24k of output, sailed under
+    a 45k limit, and had its answer cut off at the output ceiling every time.
+    """
     text = seg.text or ""
-    return 8 + len(text) // 4
+    return OUTPUT_OVERHEAD_PER_SEGMENT + len(text)
 
 
 def _estimate_segment_input_chars(seg: Segment) -> int:
@@ -600,9 +639,10 @@ def _cleanup_chunk(
             raise
         mid = len(segments) // 2
         if log_cb:
+            reason = str(e).split("—")[0].strip()
             log_cb(
-                f"AI Cleanup: batch failed — splitting {len(segments)} segments "
-                f"into {mid} + {len(segments) - mid}…"
+                f"AI Cleanup: batch failed ({reason[:80]}) — splitting {len(segments)} "
+                f"segments into {mid} + {len(segments) - mid}…"
             )
         # Each half is a send in its own right, checkpointed under its own key.
         left = _cleanup_chunk(
@@ -637,6 +677,11 @@ def _cleanup_chunk(
 def _is_transient_network_error(error: str) -> bool:
     msg = error.lower()
     return any(marker in msg for marker in _TRANSIENT_NETWORK_MARKERS)
+
+
+def _is_truncation(error: str) -> bool:
+    msg = error.lower().replace(" ", "_")
+    return any(marker.replace(" ", "_") in msg for marker in TRUNCATION_MARKERS)
 
 
 def _should_split_chunk(error: str) -> bool:
@@ -722,7 +767,12 @@ def _cleanup_chunk_once(
                 log_cb(f"AI Cleanup: saved response unusable ({e}) — re-sending.")
 
     last_error = ""
-    current_profile = profile
+    # Start from what an earlier batch in this run learned. The caller loads
+    # the profile once and hands every batch the same object, so a fix found
+    # on batch 1 (this model wants max_completion_tokens, this model rejects
+    # temperature) was saved to disk and then ignored by batches 2, 3 and 4,
+    # each of which hit the same two rejections again.
+    current_profile = _LEARNED_PROFILES.get((provider, model), profile)
     token_ceiling = output_token_ceiling(provider, model)
     network_retries = 0
     request_timeout = (30, CLEANUP_READ_TIMEOUT_SEC)
@@ -757,6 +807,7 @@ def _cleanup_chunk_once(
                     segments=len(segments),
                     model=f"{provider}/{model}",
                 )
+            _LEARNED_PROFILES[(provider, model)] = api_profile
             save_profile(api_profile)
             return merged
         except JobCancelled:
@@ -781,6 +832,17 @@ def _cleanup_chunk_once(
                         )
                     sleep_cancellable(wait, should_cancel, log_cb)
                     continue
+            if _is_truncation(last_error) and len(segments) > 1:
+                # The answer did not fit. Retrying the same batch with adjusted
+                # parameters cannot change that (measured: four identical
+                # retries of 35 to 45 seconds each, every one cut off at the
+                # same point, before the split that worked). Split now.
+                if log_cb:
+                    log_cb(
+                        f"AI Cleanup: the answer for this {len(segments)}-segment batch "
+                        f"was cut off at the output limit — splitting it."
+                    )
+                raise RuntimeError(last_error) from e
             fix = suggest_profile_fix(last_error, current_profile, provider=provider)
             if fix and fix != current_profile:
                 if log_cb:

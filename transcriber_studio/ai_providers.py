@@ -11,8 +11,14 @@ from typing import Any
 
 import requests
 
-from .ai_store import ModelProfile
+from .ai_store import ModelProfile, is_openai_reasoning_model
 from .config import APP_NAME, Settings
+
+#: Reasoning effort asked of OpenAI's reasoning models for transcript cleanup.
+#: Allowed values per the Chat Completions reference: none, minimal, low, medium
+#: (the default), high, xhigh, max; not every snapshot takes every value, so a
+#: rejection is retried without it.
+CLEANUP_REASONING_EFFORT = "low"
 from .job_cancel import JobCancelled, ShouldCancel
 
 PROVIDER_LABELS: dict[str, str] = {
@@ -394,6 +400,13 @@ def _chat_openai_compat(
         body["temperature"] = profile.temperature
     if provider in ("openai", "openrouter") and not profile.omit_json_response_format:
         body["response_format"] = {"type": "json_object"}
+    wants_low_effort = is_openai_reasoning_model(provider, model)
+    if wants_low_effort:
+        # The work here is mechanical restructuring of a transcript. Reasoning
+        # tokens are billed as output and the default effort is medium; low
+        # keeps the model's judgement for the awkward merges without paying for
+        # deliberation on every line. Same idea as Gemini's thinking budget.
+        body["reasoning_effort"] = CLEANUP_REASONING_EFFORT
 
     r = requests.post(
         _openai_compat_url(provider),
@@ -401,6 +414,16 @@ def _chat_openai_compat(
         json=body,
         timeout=timeout,
     )
+    if r.status_code == 400 and wants_low_effort and "reasoning" in (r.text or "").lower():
+        # Not every snapshot takes every effort value. Ask again without it
+        # rather than fail the batch over a knob that is only an economy.
+        body.pop("reasoning_effort", None)
+        r = requests.post(
+            _openai_compat_url(provider),
+            headers=_openai_compat_headers(settings, provider),
+            json=body,
+            timeout=timeout,
+        )
     if not r.ok:
         raise ProviderError(_http_error_text(r))
     data = r.json()

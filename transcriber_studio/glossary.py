@@ -114,11 +114,14 @@ def resolve_glossary(
             if log_cb:
                 log_cb(
                     f"Glossary: extraction off — using shared glossary "
-                    f"'{shared.name}' as-is ({shared.summary()})."
+                    f"'{shared.name}' terms ({len(shared.terms)}) and its curated "
+                    f"speakers ({len(curated_speakers(shared.speakers))}); rows keyed by "
+                    f"a speaker label are left out, since one recording's labels mean "
+                    f"nothing in another."
                 )
             if progress_cb:
                 progress_cb(1.0)
-            return shared.payload()
+            return {"speakers": curated_speakers(shared.speakers), "terms": list(shared.terms)}
         if log_cb:
             log_cb("Glossary: disabled — cleanup will use batch context only.")
         return dict(EMPTY_GLOSSARY)
@@ -188,16 +191,71 @@ def contribute_to_shared(
         if log_cb:
             log_cb(f"Glossary: could not write shared glossary '{shared.name}' ({e}).")
 
+    # Only rows a person curated into the shared glossary join this recording's
+    # roster. A row keyed by a diarization label ("Speaker 2" = Greg) was
+    # written for some other recording's labels: handing it over told the model
+    # "Speaker 2 is Greg" on every recording that used the glossary, and Greg
+    # turned up in meetings he was never in.
+    curated = curated_speakers(shared.speakers)
     merged = {
-        "speakers": merge_speakers([shared.speakers, own.get("speakers") or []]),
+        "speakers": merge_speakers([curated, own.get("speakers") or []]),
         "terms": shared.terms,
     }
     if log_cb:
+        dropped = len(shared.speakers) - len(curated)
+        note = f"; {dropped} shared row(s) keyed by a speaker label left out" if dropped else ""
         log_cb(
-            f"Glossary: cleanup will use shared '{shared.name}' — "
-            f"{len(merged['speakers'])} speaker(s), {len(merged['terms'])} term(s)."
+            f"Glossary: cleanup will use shared '{shared.name}' terms "
+            f"({len(merged['terms'])}) and a roster of {len(merged['speakers'])} speaker(s), "
+            f"{len(own.get('speakers') or [])} from this recording{note}."
         )
     return merged
+
+
+def curated_speakers(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The shared-roster rows worth lending to another recording: a stable label
+    (a role or a name, not "Speaker 2" or "SPEAKER_00") and a real name."""
+    kept = []
+    for row in rows or []:
+        label = str(row.get("label") or "").strip()
+        name = str(row.get("name") or "").strip()
+        if not name or not label or GENERIC_SPEAKER_LABEL.fullmatch(label):
+            continue
+        if label.lower() == "unknown":
+            continue
+        kept.append(row)
+    return kept
+
+
+def roster_is_stale(roster: list[dict[str, Any]], current_labels: list[str]) -> bool:
+    """True when a saved roster was written for a different set of speaker
+    labels than the transcript now has.
+
+    A roster maps labels like "Speaker 2" to people. Those labels are minted
+    afresh every time speakers are detected, so a roster written before a
+    re-detection points at the wrong people. Two checks, on the generic
+    labels only: every roster row must still be accounted for (its label is
+    present, or the transcript already shows the name it resolved to), and
+    the transcript must not have generic labels the roster never saw.
+    Named rows and "Unknown" rows are not evidence either way.
+    """
+    current = {str(s) for s in current_labels if s}
+    if not roster or not current:
+        return False
+    roster_generic: set[str] = set()
+    unaccounted = False
+    for row in roster:
+        label = str(row.get("label") or "").strip()
+        if not GENERIC_SPEAKER_LABEL.fullmatch(label):
+            continue
+        roster_generic.add(label)
+        name = str(row.get("name") or "").strip()
+        if label not in current and not (name and name in current):
+            unaccounted = True
+    transcript_generic = {s for s in current if GENERIC_SPEAKER_LABEL.fullmatch(s)}
+    if not roster_generic:
+        return False
+    return unaccounted or bool(transcript_generic - roster_generic)
 
 
 def speakers_as_terms(speakers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -238,17 +296,31 @@ def _recording_glossary(
     if log_cb:
         log_cb(f"Glossary: file {path.name}")
 
+    kept_terms: list[dict[str, Any]] = []
     if path.exists() and not settings.force_reextract:
         try:
             glossary = load_glossary(path)
-            if log_cb:
-                log_cb(
-                    f"Glossary: loaded existing file — "
-                    f"{len(glossary['speakers'])} speaker(s), {len(glossary['terms'])} term(s)"
-                )
-            if progress_cb:
-                progress_cb(1.0)
-            return glossary
+            if roster_is_stale(glossary["speakers"], result.speakers):
+                # Speakers were detected again since this roster was written,
+                # so "Speaker 2" no longer means the person it named. Keep the
+                # terms, which are about words and still hold; redo the roster.
+                kept_terms = list(glossary["terms"])
+                if log_cb:
+                    log_cb(
+                        f"Glossary: the saved roster names {len(glossary['speakers'])} "
+                        f"speaker label(s) but this transcript's labels differ (speakers "
+                        f"were re-detected) — re-extracting the roster; "
+                        f"{len(kept_terms)} term(s) kept."
+                    )
+            else:
+                if log_cb:
+                    log_cb(
+                        f"Glossary: loaded existing file — "
+                        f"{len(glossary['speakers'])} speaker(s), {len(glossary['terms'])} term(s)"
+                    )
+                if progress_cb:
+                    progress_cb(1.0)
+                return glossary
         except Exception as e:
             if log_cb:
                 log_cb(f"Glossary: could not load {path.name} ({e}) — re-extracting…")
@@ -286,6 +358,8 @@ def _recording_glossary(
             should_cancel=should_cancel,
             resume=resume,
         )
+        if kept_terms:
+            glossary["terms"] = merge_terms([kept_terms, glossary.get("terms") or []])
         save_glossary(path, glossary)
         if log_cb:
             log_cb(

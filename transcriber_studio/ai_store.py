@@ -69,6 +69,35 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+#: OpenAI's reasoning models. Verified on OpenAI's model pages for gpt-5.6-sol
+#: (alias gpt-5.6), gpt-5.6-terra, gpt-5.6-luna and gpt-6-astra: 1,050,000-token
+#: context, 128,000 max output tokens, reasoning effort from none to max. The
+#: Chat Completions reference marks max_tokens deprecated and incompatible with
+#: reasoning models, and live these models rejected a non-default temperature.
+OPENAI_REASONING_MARKERS = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def is_openai_reasoning_model(provider: str, model_id: str) -> bool:
+    if provider not in ("openai", "openrouter"):
+        return False
+    m = (model_id or "").lower()
+    if provider == "openrouter" and not m.startswith("openai/"):
+        return False
+    return any(marker in m for marker in OPENAI_REASONING_MARKERS)
+
+
+def default_profile(provider: str, model_id: str) -> ModelProfile:
+    """What to send a model nothing has been learned about yet.
+
+    For OpenAI's reasoning models that means max_completion_tokens and no
+    temperature from the first request. Learning it by rejection cost two
+    failed sends per batch before this existed."""
+    profile = ModelProfile(provider=provider, model_id=model_id)
+    if is_openai_reasoning_model(provider, model_id):
+        profile = profile.with_changes(use_max_completion_tokens=True, omit_temperature=True)
+    return profile
+
+
 def load_profile(provider: str, model_id: str) -> ModelProfile:
     with _connect() as conn:
         row = conn.execute(
@@ -76,7 +105,7 @@ def load_profile(provider: str, model_id: str) -> ModelProfile:
             (provider, model_id),
         ).fetchone()
     if not row:
-        return ModelProfile(provider=provider, model_id=model_id)
+        return default_profile(provider, model_id)
     return ModelProfile(
         provider=row["provider"],
         model_id=row["model_id"],
@@ -163,6 +192,7 @@ def suggest_profile_fix(
             "missing 'segments'",
             "stop_reason=max_tokens",
             "finish_reason=length",
+            "finish_reason=max_tokens",
         )
     ):
         if uses_json_mode and not profile.omit_json_response_format:
@@ -170,6 +200,10 @@ def suggest_profile_fix(
         cap = 8192 if provider == "anthropic" else 16384
         if profile.max_tokens < cap:
             return profile.with_changes(max_tokens=min(cap, max(profile.max_tokens * 2, 8192)))
+        # Already at the cap: the answer simply does not fit, and no parameter
+        # change helps. Halving max_tokens, which the branch below would do for
+        # a rejected-parameter error, would only cut the answer off sooner.
+        return None
     if "finish_reason=length" in msg.replace(" ", "_") or "max tokens" in msg:
         cap = 8192 if provider == "anthropic" else 16384
         if profile.max_tokens < cap:

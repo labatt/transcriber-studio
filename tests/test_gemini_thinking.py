@@ -25,7 +25,7 @@ from transcriber_studio import ai_providers
 from transcriber_studio.ai_store import ModelProfile
 
 
-def _profile(max_tokens: int = 16_384) -> ModelProfile:
+def _profile(max_tokens: int = 32_768) -> ModelProfile:
     return ModelProfile(
         provider="google", model_id="gemini-flash-latest",
         max_tokens=max_tokens, temperature=0.2,
