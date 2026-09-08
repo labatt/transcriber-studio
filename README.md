@@ -470,6 +470,15 @@ Voiceprints work with every engine whose speakers come from pyannote — local W
 ElevenLabs Scribe and Gemini separate speakers themselves and return no voice data, so on those
 engines speakers stay numbered per recording.
 
+**Wrong speaker count?** The *at least / at most* limits in the Options panel persist between
+jobs, so a meeting of six can come back as two because the last recording was a call. Select the
+finished job and press **Detect speakers** again: it asks for new limits for this run only,
+re-runs pyannote, and regroups the transcript word by word from the original timings. Nothing is
+re-transcribed. The words are kept on every transcript from this version on; for a job finished
+before that, the word timings are recovered first by aligning the transcript's text to the audio
+(the wav2vec2 aligner bundled with torchaudio, English, downloaded on first use), with words the
+aligner cannot place spaced evenly within their turn instead.
+
 ---
 
 ## AI cleanup
@@ -481,7 +490,13 @@ garbled rather than guessing.
 ![AI cleanup](docs/screenshots/05-ai-cleanup.png)
 
 Works with OpenRouter, OpenAI, Anthropic, Google, xAI, and Ollama (cloud or local). Keys go in
-Settings and are only ever sent to the provider they belong to. Prompt caching is used where the
+Settings and are only ever sent to the provider they belong to. Each model's quirks are learned
+and remembered: which parameter name it wants for the output limit, whether it rejects a
+temperature, how large an answer it can return. OpenAI's reasoning models (the GPT-5.6 family:
+Sol, Terra, Luna; and GPT-6) are known in advance, so they get `max_completion_tokens`, no
+temperature, a low reasoning effort for this mechanical task, and batches sized for their
+128,000-token output limit from the first request. Gemini models have their thinking budget set
+to zero for the same reason. Prompt caching is used where the
 provider supports it, and an interrupted run resumes without paying for the same calls twice.
 
 ---
