@@ -11,7 +11,16 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import denoise, diarization, filename_builder, formatters, glossary, vad, vocab_bias
+from . import (
+    denoise,
+    diarization,
+    filename_builder,
+    formatters,
+    glossary,
+    vad,
+    vocab_bias,
+    word_timings,
+)
 from . import resume as resume_store
 from .ai_cleanup import cleanup_transcript
 from .audio_cache import CACHE_DIR, attach_if_cached, cache_path
@@ -37,6 +46,18 @@ class JobResult:
     cancelled: bool = False     # stopped by the user, not a failure
 
 
+def describe_bounds(min_speakers: int, max_speakers: int) -> str:
+    """"at least 2, at most 6", "at most 2", "exactly 3", or "any number of speakers"."""
+    if min_speakers and max_speakers and min_speakers == max_speakers:
+        return f"exactly {min_speakers} speaker{'s' if min_speakers != 1 else ''}"
+    parts = []
+    if min_speakers:
+        parts.append(f"at least {min_speakers}")
+    if max_speakers:
+        parts.append(f"at most {max_speakers}")
+    return (", ".join(parts) + " speakers") if parts else "any number of speakers"
+
+
 def copy_transcript(transcript: TranscriptResult) -> TranscriptResult:
     """Deep copy of a transcript.
 
@@ -58,6 +79,7 @@ def copy_transcript(transcript: TranscriptResult) -> TranscriptResult:
             k: list(v) for k, v in transcript.speaker_embeddings.items()
         },
         speaker_seconds=dict(transcript.speaker_seconds),
+        words=[dict(w) for w in transcript.words],
     )
 
 
@@ -196,9 +218,20 @@ class JobRunner:
         )
 
     def apply_diarization(
-        self, result: TranscriptResult, progress_cb=None, log_cb=None, should_cancel=None
+        self, result: TranscriptResult, progress_cb=None, log_cb=None, should_cancel=None,
+        *, min_speakers: int | None = None, max_speakers: int | None = None,
     ) -> TranscriptResult:
-        """Label speakers on an existing transcript without re-running Whisper."""
+        """Label speakers on an existing transcript without re-running the decoder.
+
+        ``min_speakers`` and ``max_speakers`` override the saved settings for
+        this run only. That is how a transcript diarized under the wrong limits
+        gets done again: a meeting of six people that was told "at most two"
+        comes back as two, and no relabelling of those two turns can find the
+        other four. When the transcript still carries its words they are
+        regrouped into turns exactly as a fresh run would; without words the
+        existing segments are relabelled, which cannot split a turn the old
+        limits merged, and the log says so.
+        """
         if not self.s.hf_token:
             raise RuntimeError(
                 "Speaker diarization needs a HuggingFace token. Add one in Settings.\n\n"
@@ -209,32 +242,46 @@ class JobRunner:
             raise RuntimeError(
                 "pyannote.audio is not installed. Run: pip install pyannote.audio"
             )
+        lo = self.s.min_speakers if min_speakers is None else min_speakers
+        hi = self.s.max_speakers if max_speakers is None else max_speakers
+        log = log_cb or (lambda _m: None)
         audio_path = self._ensure_audio(result.recording, progress_cb, log_cb, should_cancel)
-        if log_cb:
-            log_cb("Running speaker diarization (existing transcript kept)…")
+        log(f"Running speaker diarization ({describe_bounds(lo, hi)}); the words are kept.")
+        if not result.words:
+            # A transcript from before word timings were kept. Recover them by
+            # aligning its text to the audio, so the turns can still be redrawn
+            # word by word rather than relabelled whole.
+            log("No word timings on this transcript; recovering them from the audio first.")
+            result.words = word_timings.recover_words(
+                audio_path, result.segments, result.language, log, should_cancel
+            )
         diar = diarization.Diarizer(self.s.hf_token, self.s.device)
         diarized = diar.diarize(
-            audio_path,
-            self.s.min_speakers,
-            self.s.max_speakers,
-            progress_cb,
-            log_cb,
-            should_cancel=should_cancel,
+            audio_path, lo, hi, progress_cb, log_cb, should_cancel=should_cancel,
         )
         names = Transcriber._recognized_names(
-            diarized, log_cb or (lambda _m: None),
+            diarized, log,
             threshold=self.s.voiceprint_threshold,
             margin=self.s.voiceprint_margin,
             min_speech=self.s.voiceprint_min_speech_s,
             source=result.recording.display_name,
         )
-        mapping = Transcriber._stable_speaker_map(diarized.turns, names)
-        for seg in result.segments:
-            raw = diarization.assign_speaker(seg.start, seg.end, diarized.turns)
-            seg.speaker = mapping.get(raw) if raw else None
-        result.speakers = list(dict.fromkeys(
-            s.speaker for s in result.segments if s.speaker
-        ))
+        if result.words:
+            # Regroup from the words, as a first run does: turns are drawn where
+            # the new speaker boundaries fall, not where the old ones did.
+            words = [dict(w) for w in result.words]
+            segments, speakers = self.transcriber._apply_speakers(
+                result.segments, words, diarized, log, names
+            )
+            result.segments, result.speakers, result.words = segments, speakers, words
+        else:
+            mapping = Transcriber._stable_speaker_map(diarized.turns, names)
+            for seg in result.segments:
+                raw = diarization.assign_speaker(seg.start, seg.end, diarized.turns)
+                seg.speaker = mapping.get(raw) if raw else None
+            result.speakers = list(dict.fromkeys(
+                s.speaker for s in result.segments if s.speaker
+            ))
         # Without this the rename dialog has labels but nothing to enrol from,
         # so "Remember this voice" sits greyed out after a Detect speakers run.
         result.speaker_embeddings, result.speaker_seconds = (

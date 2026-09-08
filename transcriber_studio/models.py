@@ -85,6 +85,12 @@ class TranscriptResult:
     #: How long each speaker spoke. Enrolling a voice from a few seconds would
     #: poison every later recording, so the dialog needs to know.
     speaker_seconds: dict[str, float] = field(default_factory=dict)
+    #: The decoder's words with their timings, as the speaker stage consumed
+    #: them. Kept on the finished transcript so speakers can be detected again
+    #: later with different limits and regrouped word by word, rather than
+    #: relabelling turns that were drawn under the old limits and cannot be
+    #: split. Empty for engines that hand back segments only.
+    words: list[dict] = field(default_factory=list)
 
     @property
     def speaker_count(self) -> int:

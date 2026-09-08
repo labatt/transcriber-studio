@@ -10,7 +10,13 @@ from PySide6.QtCore import QThread, Signal
 
 from .config import Settings
 from .job_cancel import JobCancelled
-from .jobs import JobResult, JobRunner, copy_transcript, ensure_original_snapshot
+from .jobs import (
+    JobResult,
+    JobRunner,
+    copy_transcript,
+    ensure_original_snapshot,
+    remove_superseded_outputs,
+)
 from .models import Recording
 from .plaud_client import PlaudClient
 
@@ -65,18 +71,29 @@ class TranscriptionWorker(QThread):
 
 
 class DiarizationWorker(QThread):
-    """Runs speaker detection on a finished transcript without re-transcribing."""
+    """Runs speaker detection on a finished transcript without re-transcribing.
+
+    Also how speakers get detected *again*: pass ``min_speakers`` and
+    ``max_speakers`` to override the saved limits for this run. The work is
+    done on a copy, so a cancelled or failed run leaves the job exactly as it
+    was, and the outputs the new speaker names supersede are removed.
+    """
 
     log_item = Signal(int, str)
     progress_item = Signal(int, float)
     done = Signal(int, object)   # row, JobResult
     error = Signal(int, str)     # row, message
 
-    def __init__(self, settings: Settings, row: int, result: JobResult, parent=None):
+    def __init__(
+        self, settings: Settings, row: int, result: JobResult, parent=None,
+        *, min_speakers: int | None = None, max_speakers: int | None = None,
+    ):
         super().__init__(parent)
         self.settings = settings
         self.row = row
         self.result = result
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
         self._cancel = False
 
     def cancel(self):
@@ -89,15 +106,29 @@ class DiarizationWorker(QThread):
     def run(self):
         runner = JobRunner(self.settings)
         row = self.row
+        working = copy_transcript(self.result.transcript)
         try:
             runner.apply_diarization(
-                self.result.transcript,
+                working,
                 progress_cb=lambda f, r=row: self.progress_item.emit(r, f),
                 log_cb=lambda m, r=row: self.log_item.emit(r, m),
                 should_cancel=lambda: self._cancel,
+                min_speakers=self.min_speakers,
+                max_speakers=self.max_speakers,
             )
-            paths = runner.write_outputs(self.result.transcript, index=row + 1)
+            previous = list(self.result.output_paths)
+            paths = runner.write_outputs(working, index=row + 1)
+            if working.words and self.result.ai_cleanup_applied:
+                # The turns were redrawn from the raw words, so the cleanup
+                # pass that rewrote the old turns is gone with them. It can be
+                # run again on the new speakers.
+                self.result.ai_cleanup_applied = False
+                self.log_item.emit(row, "AI cleanup was undone by re-detecting speakers; "
+                                        "run it again on the new turns.")
+            self.result.transcript = working
             self.result.output_paths = paths
+            for gone in remove_superseded_outputs(previous, paths):
+                self.log_item.emit(row, f"Removed superseded output: {Path(gone).name}")
             self.done.emit(row, self.result)
         except JobCancelled:
             # Asking to stop is not an error; the transcript is untouched.

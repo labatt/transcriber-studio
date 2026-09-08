@@ -40,6 +40,9 @@ def _transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
         # out on every job that was in the list before the app closed.
         "speaker_embeddings": transcript.speaker_embeddings,
         "speaker_seconds": transcript.speaker_seconds,
+        # The words too, so "Detect speakers" on a job from before the restart
+        # can still regroup them under new limits instead of relabelling turns.
+        "words": transcript.words,
     }
 
 
@@ -64,6 +67,7 @@ def _transcript_from_dict(rec: Recording, td: dict[str, Any]) -> TranscriptResul
         speaker_seconds={
             str(k): float(v) for k, v in (td.get("speaker_seconds") or {}).items()
         },
+        words=[dict(w) for w in (td.get("words") or []) if isinstance(w, dict)],
     )
 
 

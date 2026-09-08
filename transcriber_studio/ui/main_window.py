@@ -61,6 +61,7 @@ from .recordings_tab import RecordingsTab
 from .rename_dialog import SpeakerRenameDialog
 from .settings_dialog import SettingsDialog
 from .setup_wizard import SetupWizard
+from .speaker_count_dialog import SpeakerCountDialog
 from .speakers_dialog import SpeakersDialog
 
 QUEUE_COLS = ["Recording", "Source", "Status", "Progress", "Output"]
@@ -335,6 +336,10 @@ class MainWindow(QMainWindow):
         self.clear_jobs_btn = QPushButton("Clear all")
         self.clear_jobs_btn.clicked.connect(self._clear_all_jobs)
         self.detect_speakers_btn = QPushButton("Detect speakers")
+        self.detect_speakers_btn.setToolTip(
+            "Detect who spoke when on the selected transcript, or detect again with "
+            "different speaker limits. The words are kept; only the turns are redrawn."
+        )
         self.detect_speakers_btn.clicked.connect(self._detect_speakers_selected)
         self.rename_speakers_btn = QPushButton("Rename speakers")
         self.rename_speakers_btn.clicked.connect(self._rename_speakers_selected)
@@ -428,9 +433,9 @@ class MainWindow(QMainWindow):
             and self._processing_row not in self._selected_job_rows()
         )
         self.clear_jobs_btn.setEnabled(self.queue.rowCount() > 0 and not busy)
-        self.detect_speakers_btn.setEnabled(
-            completed and not busy and not (result.transcript.speakers if result and result.transcript else False)
-        )
+        # Enabled whether or not the transcript has speakers: detecting them
+        # again with different limits is how a wrong speaker count gets fixed.
+        self.detect_speakers_btn.setEnabled(completed and not busy)
         self.rename_speakers_btn.setEnabled(
             completed and not busy and bool(result and result.transcript and result.transcript.speakers)
         )
@@ -1357,11 +1362,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Detect speakers", "Select a completed job first.")
             return
         row, result = selected
-        if result.transcript.speakers:
-            QMessageBox.information(
-                self, "Detect speakers", "This job already has speaker labels. Use Rename speakers instead."
-            )
-            return
         if not self.settings.hf_token:
             QMessageBox.information(
                 self,
@@ -1372,7 +1372,14 @@ class MainWindow(QMainWindow):
                 "job again instead of detecting afterwards.",
             )
             return
-        self._run_diarization(row, result)
+        dlg = SpeakerCountDialog(
+            result.transcript, self.settings, self,
+            cleanup_applied=bool(result.ai_cleanup_applied),
+        )
+        if not dlg.exec():
+            return
+        lo, hi = dlg.bounds()
+        self._run_diarization(row, result, lo, hi)
 
     def _rename_speakers_selected(self):
         selected = self._selected_job()
@@ -1444,14 +1451,20 @@ class MainWindow(QMainWindow):
             glossary_id=choice.glossary_id,
         )
 
-    def _run_diarization(self, row: int, result: JobResult):
+    def _run_diarization(
+        self, row: int, result: JobResult,
+        min_speakers: int | None = None, max_speakers: int | None = None,
+    ):
         if self._jobs_busy():
             QMessageBox.information(self, "Busy", "Another job action is already running.")
             return
         self._processing_row = row
         self.start_btn.setEnabled(False)
         self._set_status(row, "Detecting speakers…")
-        self._diar_worker = self._track(DiarizationWorker(self.settings, row, result))
+        self._diar_worker = self._track(DiarizationWorker(
+            self.settings, row, result,
+            min_speakers=min_speakers, max_speakers=max_speakers,
+        ))
         self._diar_worker.log_item.connect(self._on_item_log)
         self._diar_worker.progress_item.connect(self._on_item_progress)
         self._diar_worker.done.connect(self._on_diarization_done)
@@ -1526,8 +1539,9 @@ class MainWindow(QMainWindow):
         )
         self._persist_queue()
         self._update_job_actions()
-        dlg = SpeakerRenameDialog(result.transcript, self)
+        dlg = SpeakerRenameDialog(result.transcript, self, settings=self.settings)
         if dlg.exec():
+            dlg.apply_enrollments(log=self._log)
             renames = dlg.renames()
             if renames:
                 apply_speaker_renames(result.transcript, renames)

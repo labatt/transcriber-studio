@@ -571,6 +571,7 @@ class Transcriber:
             speakers=speakers_order,
             speaker_embeddings=speaker_vectors,
             speaker_seconds=speaker_seconds,
+            words=words,
         )
 
     def _decode_or_restore(

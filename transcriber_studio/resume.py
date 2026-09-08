@@ -322,6 +322,7 @@ def transcript_to_dict(transcript: TranscriptResult) -> dict[str, Any]:
         # as one that went straight through.
         "speaker_embeddings": transcript.speaker_embeddings,
         "speaker_seconds": transcript.speaker_seconds,
+        "words": transcript.words,
     }
 
 
@@ -329,6 +330,7 @@ def transcript_from_dict(recording: Recording, data: dict[str, Any]) -> Transcri
     return TranscriptResult(
         recording=recording,
         segments=[_segment_from_dict(s) for s in data.get("segments", [])],
+        words=[dict(w) for w in (data.get("words") or []) if isinstance(w, dict)],
         speaker_embeddings={
             str(k): [float(x) for x in v]
             for k, v in (data.get("speaker_embeddings") or {}).items()
