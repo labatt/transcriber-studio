@@ -28,7 +28,7 @@ from .config import Settings
 from .job_cancel import JobCancelled, ShouldCancel, check_cancel
 from .models import Recording, Source, TranscriptResult
 from .plaud_client import PlaudClient
-from .transcriber import TranscribeOptions, Transcriber
+from .transcriber import TranscribeOptions, Transcriber, expected_model_label
 
 
 @dataclass
@@ -96,7 +96,8 @@ def apply_speaker_renames(result: TranscriptResult, renames: dict[str, str]) -> 
     for seg in result.segments:
         if seg.speaker in renames:
             seg.speaker = renames[seg.speaker]
-    result.speakers = [renames.get(s, s) for s in result.speakers]
+    # Two labels renamed to the same person are one speaker, not two.
+    result.speakers = list(dict.fromkeys(renames.get(s, s) for s in result.speakers))
 
 
 def remove_superseded_outputs(old_paths: list[str], new_paths: list[str]) -> list[str]:
@@ -421,14 +422,28 @@ class JobRunner:
         """
         opts = self._opts(recording)
         key = resume_store.transcript_key(recording, opts)
+        label = expected_model_label(opts)
         saved = resume.get(key)
+        matched_by = "the same options"
+        if not saved:
+            # The key formula has changed more than once as the app learned
+            # which settings really shape a transcript. A transcript banked
+            # under an older formula is still worth having: accept it when it
+            # was made by the same engine and model, which the entry itself
+            # records.
+            saved = resume.latest(
+                resume_store.TRANSCRIPT_STAGE,
+                lambda raw: json.loads(raw).get("model") == label,
+            )
+            matched_by = "engine and model"
         if saved:
             try:
                 transcript = resume_store.transcript_from_dict(recording, json.loads(saved))
                 if log_cb:
                     log_cb(
-                        f"Restored transcript from an interrupted run — "
-                        f"{len(transcript.segments)} segment(s), no re-transcription."
+                        f"Restored transcript from an interrupted run (matched by "
+                        f"{matched_by}) — {len(transcript.segments)} segment(s), no "
+                        f"re-transcription."
                     )
                 if progress_cb:
                     progress_cb(0.92)
@@ -445,6 +460,8 @@ class JobRunner:
             json.dumps(resume_store.transcript_to_dict(transcript), ensure_ascii=False),
             stage=resume_store.TRANSCRIPT_STAGE,
             segments=len(transcript.segments),
+            engine=opts.engine,
+            model=label,
         )
         return transcript
 

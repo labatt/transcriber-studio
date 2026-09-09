@@ -113,6 +113,29 @@ class ResumeLog:
     def get(self, key: str) -> str | None:
         return self._entries.get(key)
 
+    def latest(self, stage: str, accept=None) -> str | None:
+        """The newest saved entry for ``stage`` that ``accept(raw)`` approves.
+
+        For finding work banked under a key formula that has since changed:
+        the entry is still there, only its address moved. ``accept`` is what
+        keeps this honest, by checking the entry's own contents.
+        """
+        candidates = sorted(
+            (k for k, s in self._stages.items() if s == stage),
+            key=lambda k: float(self._meta.get(k, {}).get("at", 0) or 0),
+            reverse=True,
+        )
+        for key in candidates:
+            raw = self._entries.get(key)
+            if raw is None:
+                continue
+            try:
+                if accept is None or accept(raw):
+                    return raw
+            except Exception:
+                continue
+        return None
+
     def count(self, stage: str | None = None) -> int:
         if stage is None:
             return len(self._entries)
@@ -194,42 +217,82 @@ def log_for(recording: Recording, log_cb=None) -> ResumeLog:
 
 # -- transcript stage ---------------------------------------------------
 
-def transcript_key(recording: Recording, opts: Any) -> str:
-    """Identifies a transcript by everything that would change its content."""
-    return send_key(
-        "transcript",
-        recording.id,
-        # The engine is part of the identity: a Whisper transcript must never
-        # be restored for a run the user switched to ElevenLabs, or the other
-        # way round.
-        str(getattr(opts, "engine", "local")),
-        str(getattr(opts, "elevenlabs_model", "")),
-        str(getattr(opts, "gemini_model", "")),
-        str(getattr(opts, "gemini_mode", "")),
-        str(opts.model),
-        str(opts.language),
-        str(opts.diarization_enabled),
-        str(opts.min_speakers),
-        str(opts.max_speakers),
-        str(opts.channel_mode),
-        ",".join(opts.channel_names or []),
-        # The layers in front of the decoder change the words that come out of
-        # it, so a saved transcript from before they were switched on must not
-        # be restored over the run that switched them on.
+def _decode_fields(opts: Any) -> list[str]:
+    """What changes the words an engine produces, for that engine only.
+
+    Two rules learned the hard way. First, only the settings the engine in
+    use actually reads are included: ElevenLabs never sees the VAD or the
+    hallucination guard, so toggling them must not orphan a Scribe transcript.
+    Second, the vocabulary hint list is reduced to on/off, never its text. The
+    hints are built from the shared glossary, and the glossary stage of a job
+    adds terms to that glossary before cleanup runs. A job interrupted during
+    cleanup therefore came back with a different hint list, a different key,
+    and no way to find the transcript it had banked minutes earlier; measured
+    live, that re-uploaded an hour of audio to ElevenLabs.
+    """
+    engine = str(getattr(opts, "engine", "local") or "local")
+    fields = [
+        engine,
+        str(getattr(opts, "language", "auto")),
+        str(getattr(opts, "channel_mode", "downmix")),
+        ",".join(getattr(opts, "channel_names", None) or []),
+        # The denoiser changes what every engine hears, so it stays for all.
         str(getattr(opts, "denoise", "")),
-        str(getattr(opts, "vad_enabled", True)),
-        repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
-        str(getattr(opts, "hotwords", "")),
-        str(getattr(opts, "hallucination_guard", False)),
-        # The cloud decoder's own knobs. Without these a verbatim MAI decode
-        # would be restored for a run that asked for the clean style.
-        str(getattr(opts, "mai_model", "")),
-        str(getattr(opts, "mai_style", "")),
-    )
+    ]
+    hints = bool(getattr(opts, "hotwords", ""))
+    if engine == "local":
+        fields += [
+            str(getattr(opts, "model", "")),
+            str(getattr(opts, "vad_enabled", True)),
+            repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
+            f"hints={'on' if hints else 'off'}",
+            str(getattr(opts, "hallucination_guard", False)),
+        ]
+    elif engine == "mai":
+        fields += [
+            str(getattr(opts, "mai_model", "")),
+            str(getattr(opts, "mai_style", "")),
+            f"hints={'on' if hints and getattr(opts, 'mai_send_phrases', True) else 'off'}",
+            # With MAI's own diarization the speakers are part of the decode.
+            str(getattr(opts, "mai_speakers", "local")),
+        ]
+    elif engine == "gemini":
+        fields += [str(getattr(opts, "gemini_model", "")), str(getattr(opts, "gemini_mode", ""))]
+    elif engine == "elevenlabs":
+        fields += [
+            str(getattr(opts, "elevenlabs_model", "")),
+            str(getattr(opts, "tag_audio_events", False)),
+        ]
+    else:
+        fields += [str(getattr(opts, "model", ""))]
+    return fields
+
+
+def _speaker_fields(opts: Any) -> list[str]:
+    """What changes the speaker labels on top of the words, per engine."""
+    engine = str(getattr(opts, "engine", "local") or "local")
+    diarized = str(getattr(opts, "diarization_enabled", True))
+    if engine == "elevenlabs":
+        # Scribe takes an upper bound on speakers and nothing else.
+        return [diarized, str(getattr(opts, "max_speakers", 0))]
+    if engine == "gemini":
+        return [diarized]
+    return [diarized, str(getattr(opts, "min_speakers", 0)), str(getattr(opts, "max_speakers", 0))]
+
+
+def transcript_key(recording: Recording, opts: Any) -> str:
+    """Identifies a transcript by everything that would change its content.
+
+    The engine is part of the identity: a Whisper transcript must never be
+    restored for a run the user switched to ElevenLabs, or the other way
+    round. See _decode_fields for what else counts, and what deliberately does
+    not.
+    """
+    return send_key("transcript", recording.id, *_decode_fields(opts), *_speaker_fields(opts))
 
 
 def decode_key(recording: Recording, opts: Any) -> str:
-    """Identifies a Whisper decode by everything that changes the words.
+    """Identifies a decode by everything that changes the words.
 
     Deliberately excludes the diarization settings that transcript_key
     includes: speaker labels are attached to the segments afterwards, so a
@@ -238,24 +301,7 @@ def decode_key(recording: Recording, opts: Any) -> str:
     of audio can take minutes, and a crash in the middle of it used to throw
     away the far more expensive decode that came before.
     """
-    return send_key(
-        "decode",
-        recording.id,
-        str(getattr(opts, "engine", "local")),
-        str(opts.model),
-        str(opts.language),
-        str(opts.channel_mode),
-        ",".join(opts.channel_names or []),
-        str(getattr(opts, "denoise", "")),
-        str(getattr(opts, "vad_enabled", True)),
-        repr(sorted((getattr(opts, "vad_parameters", None) or {}).items())),
-        str(getattr(opts, "hotwords", "")),
-        str(getattr(opts, "hallucination_guard", False)),
-        # The cloud decoder's own knobs. Without these a verbatim MAI decode
-        # would be restored for a run that asked for the clean style.
-        str(getattr(opts, "mai_model", "")),
-        str(getattr(opts, "mai_style", "")),
-    )
+    return send_key("decode", recording.id, *_decode_fields(opts))
 
 
 #: Everything a Segment carries. Named here so a restored run rebuilds the

@@ -121,6 +121,21 @@ def _cloud_model_id(opts: TranscribeOptions) -> str:
     }.get(opts.engine, opts.elevenlabs_model)
 
 
+def expected_model_label(opts: TranscribeOptions) -> str:
+    """The ``TranscriptResult.model`` these options would produce, without
+    running anything. What a banked transcript is matched against when its
+    key no longer lines up with the current options."""
+    from . import stt_elevenlabs, stt_gemini
+
+    if opts.engine == ENGINE_MAI:
+        return stt_mai.model_label(opts.mai_model)
+    if opts.engine == ENGINE_GEMINI:
+        return stt_gemini.model_label(opts.gemini_model or stt_gemini.DEFAULT_MODEL)
+    if opts.engine == ENGINE_ELEVENLABS:
+        return stt_elevenlabs.model_label(opts.elevenlabs_model or stt_elevenlabs.DEFAULT_MODEL)
+    return str(opts.model)
+
+
 def faster_whisper_available() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
 
