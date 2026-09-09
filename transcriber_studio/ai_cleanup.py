@@ -8,6 +8,7 @@ import json
 import re
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -281,6 +282,14 @@ def cleanup_transcript(
             log_cb(f"AI Cleanup: cancelled — discarded {dropped} saved send(s).")
         raise
 
+    roster_names = [
+        str(row.get("name") or "").strip()
+        for row in (glossary.get("speakers") or []) if row.get("name")
+    ]
+    updated, merges = canonicalize_speakers(updated, roster_names, list(result.speakers))
+    if log_cb:
+        for line in merges:
+            log_cb(f"AI Cleanup: {line}")
     result.segments = updated
     result.speakers = list(dict.fromkeys(s.speaker for s in updated if s.speaker))
     # Every send is now reflected in the result; the transcript entry stays so
@@ -294,6 +303,101 @@ def cleanup_transcript(
     if progress_cb:
         progress_cb(1.0)
     return result
+
+
+#: Two spellings this alike are one person. "Chris Labatt-Simon" against
+#: "Chris Labat-Simon" scores 0.97; "Brad Pottinger" against "Brian Ottinger"
+#: 0.79 and "Greg Jackson" against "Greg Johnson" 0.83, all correctly apart.
+SAME_PERSON_RATIO = 0.88
+
+
+def _name_key(name: str) -> str:
+    return " ".join(name.lower().replace(" ", " ").split()).strip(" .,;:")
+
+
+def canonicalize_speakers(
+    segments: list[Segment], roster_names: list[str], original_labels: list[str]
+) -> tuple[list[Segment], list[str]]:
+    """One spelling per person across the cleaned transcript.
+
+    The model resolves each sentence's speaker on its own, so the same person
+    comes back as "Chris Labatt-Simon" on 272 sentences and "Chris Labat-Simon"
+    on 88, and the transcript gains a speaker who does not exist. Names that
+    differ only in case or spacing are unified outright. Names near enough to
+    be one person (SAME_PERSON_RATIO) are unified toward the roster's spelling
+    when the roster has one, otherwise toward the spelling used most. Generic
+    labels ("Speaker 1", "Speaker 2") are never merged with anything: they are
+    alike by construction and mean different people.
+
+    Returns the segments and a line per merge, for the log.
+    """
+    from difflib import SequenceMatcher
+
+    from .glossary import GENERIC_SPEAKER_LABEL
+
+    counts: Counter[str] = Counter(s.speaker for s in segments if s.speaker)
+    if len(counts) < 2:
+        return segments, []
+    roster_keys = {_name_key(n): n for n in roster_names if n}
+
+    # Pass one: exact after normalisation. The roster's spelling wins, then
+    # the commonest.
+    canonical_by_key: dict[str, str] = {}
+    for name, _n in counts.most_common():
+        key = _name_key(name)
+        canonical_by_key.setdefault(key, roster_keys.get(key, name))
+
+    # Pass two: near-identical keys, most frequent first, folded into a
+    # canonical already chosen. Roster names are anchors and are never folded.
+    def is_generic(key: str) -> bool:
+        return bool(GENERIC_SPEAKER_LABEL.fullmatch(key))
+
+    keys_by_weight = sorted(
+        canonical_by_key, key=lambda k: -sum(n for nm, n in counts.items() if _name_key(nm) == k)
+    )
+    # Roster names are anchors before anything else is looked at, so a more
+    # frequent misspelling cannot claim the anchor slot ahead of the real name.
+    anchors: list[str] = [k for k in keys_by_weight if k in roster_keys]
+    fold: dict[str, str] = {}
+    for key in keys_by_weight:
+        if key in roster_keys:
+            continue
+        if is_generic(key):
+            anchors.append(key)
+            continue
+        target = None
+        if key not in roster_keys:
+            best, best_ratio = None, 0.0
+            for anchor in anchors:
+                if is_generic(anchor):
+                    continue
+                ratio = SequenceMatcher(None, key, anchor).ratio()
+                if ratio > best_ratio:
+                    best, best_ratio = anchor, ratio
+            if best is not None and best_ratio >= SAME_PERSON_RATIO:
+                target = best
+        if target is None:
+            anchors.append(key)
+        else:
+            fold[key] = target
+
+    mapping: dict[str, str] = {}
+    for name in counts:
+        key = _name_key(name)
+        final_key = fold.get(key, key)
+        mapping[name] = canonical_by_key[final_key]
+
+    merges: list[str] = []
+    for name, target in mapping.items():
+        if name != target:
+            merges.append(f"unified speaker spelling — '{name}' → '{target}' ({counts[name]} sentence(s))")
+    if not merges:
+        return segments, []
+    out = [
+        Segment(**{**s.__dict__, "speaker": mapping.get(s.speaker, s.speaker)}) if s.speaker else s
+        for s in segments
+    ]
+    return out, merges
 
 
 def output_token_ceiling(provider: str, model: str) -> int:
