@@ -97,7 +97,10 @@ there is no configuration that quietly does nothing.
   from the byte it stopped at, finished denoise chunks and detected speaker turns are reused, and
   every stage can be cancelled while it runs. The transcription is banked before speaker detection
   begins, so a failure there costs you the labels, not the words. Closing the lid mid-job costs you
-  the current chunk, not the job.
+  the current chunk, not the job. A banked transcript is keyed only by the settings its engine
+  actually reads, so changing a Whisper-only option, or the glossary growing during the job, does
+  not orphan a Scribe or Gemini transcript; and one banked under an older version of the app is
+  still found by its engine and model.
 - **No length limit on cloud transcription** — MAI takes a 73-minute recording in one request.
   Gemini's output falls apart past the documented 30 minutes when speakers or word timings are
   asked for (the API *accepts* longer, but returns broken timestamps and looped sentences), so
@@ -498,6 +501,19 @@ temperature, a low reasoning effort for this mechanical task, and batches sized 
 128,000-token output limit from the first request. Gemini models have their thinking budget set
 to zero for the same reason. Prompt caching is used where the
 provider supports it, and an interrupted run resumes without paying for the same calls twice.
+
+Speaker names come back consistent. The model resolves each sentence's speaker on its own, so
+one person can return under two spellings; the app unifies spellings that differ only by case or
+spacing, folds a near-identical spelling into the roster's version or the commonest one, never
+merges two roster names or two generic labels, and logs every merge. Speaker rosters stay with
+the recording they were extracted from: a shared glossary lends only rows a person curated (a
+role or a name, not `Speaker 2`), and a roster saved before speakers were re-detected is
+re-extracted rather than reused, with its terms kept.
+
+Batches are sized to what the answer will actually be, the full text plus its JSON, and an
+answer cut off at the model's output limit splits the batch straight away instead of being
+retried. Gemini and the GPT-5.6 family get 32,768-token answers, which takes an hour-long
+transcript in two or three batches.
 
 ---
 

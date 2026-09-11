@@ -8,6 +8,90 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **MAI-Transcribe-2** (Microsoft, via Azure Speech) as a fourth transcription engine. It takes a
+  whole recording in one request (a 73-minute, 70 MB file went up unsplit), accepts up to 50
+  vocabulary hints from the glossary, and was the most accurate engine on every recording in the
+  benchmark below. Its own speaker diarization fails on anything much past 15 minutes with errors
+  that read like network timeouts, so by default the app uses MAI for the words and pyannote for
+  the speakers, which also makes voiceprints work on it. Reported to Microsoft
+  (`docs/mai-transcribe-diarization-issue.md`, MicrosoftDocs/azure-ai-docs#835). Picking MAI turns
+  denoising off for that run and says so.
+- **Voiceprints.** pyannote's per-speaker voice embeddings are kept on every transcript. Name a
+  speaker in the rename dialog, tick *Remember this voice*, and later recordings come back with
+  the name instead of `Speaker 2`. A **Speakers** button in the header opens a dialog for the
+  enrolled voices, the match thresholds, and a log of every match decision.
+- **Detect speakers again.** *Detect speakers* now works on a job that already has speakers, and
+  asks for the *at least / at most* limits for that run only, so a six-person meeting transcribed
+  as two because the previous call's limit was still set can be redone without re-transcribing.
+  Transcripts keep their word timings so the turns are regrouped word by word; a transcript from
+  before words were kept gets them back by force-aligning its text to the audio (torchaudio's
+  wav2vec2 aligner, English; median start error 59 ms against AMI's hand-timed words), with even
+  spacing as the fallback.
+- **Rename PLAUD recordings** from the list and, opt-in, push the new name to the PLAUD account
+  through its web interface (the public API is read-only). **Rename output files** from the Output
+  column.
+- **Glossary weighting.** A term seen again gains weight, and the heaviest terms are the ones
+  biased first when the hint list has to be cut to fit the decoder.
+- **Repetition controls and confidence data** for Whisper: a repetition penalty and a no-repeat
+  n-gram size in Settings, and per-segment confidence kept on the transcript.
+- **An engine benchmark** (`tools/engine_bench.py`, `tools/bench_refs.py`): every engine over
+  recordings with reference transcripts from the AMI Meeting Corpus and Earnings-22, scored on word
+  error rate, proper-noun recall, speaker attribution and diarization error rate. Results, an
+  issues log, a process log and the write-up are under `docs/`.
+- **`large-v3-turbo`** in the model list. In the benchmark it scored within two points of
+  `large-v3` on every recording.
+
+### Changed
+
+- **Gemini requests are capped at the documented 30 minutes**, lead-in included. The API accepts
+  up to about 54 minutes with speakers and word timings, but past 30 it returned word timings out
+  of order, starts hours beyond the end of the file, and a 17-word sentence repeated 60 times;
+  scored against a reference transcript that was 38 percent word error rate against 8 percent for
+  the same call cut at 30. Stray timings and decoding loops that remain are repaired and logged.
+- **AI Cleanup batches are sized to the answer's real length.** They were budgeted as if the
+  answer were a quarter of the text; it is the whole text, so 95k-character batches were cut off
+  at the output limit and retried four times before splitting. Answers are budgeted in full, a
+  cut-off answer splits at once, the split log line says why, and Gemini and OpenAI's GPT-5.6
+  family get 32,768-token answers (their documented limits are 65,536 and 128,000).
+- **OpenAI's reasoning models are known in advance.** GPT-5.6 Sol, Terra and Luna and GPT-6 get
+  `max_completion_tokens`, no temperature and a low reasoning effort from the first request,
+  instead of learning each by a rejected send; a quirk learned on one batch now carries to the
+  next batch in the same run.
+- **Uploads show progress and get a timeout sized to the file.** urllib3 applies the connect
+  timeout to writing the request body, so a 70 MB upload died with "The write operation timed
+  out" at a fixed timeout.
+- **Speaker rosters stay with their recording.** A shared glossary no longer lends rows keyed by
+  a diarization label (`Speaker 2 = Greg`) to other recordings, only rows with a stable label and
+  a name; and a recording's saved roster is re-extracted, terms kept, when its labels no longer
+  match the transcript because speakers were re-detected. Before this, one person turned up as a
+  speaker in meetings they were never in, and a re-detected seven-speaker transcript came out
+  with fourteen labels.
+- **One spelling per person after cleanup.** The model can return the same speaker under two
+  spellings; case and spacing variants are unified, near-identical spellings are folded toward
+  the roster's or the commonest, generic labels and distinct roster names are never merged, and
+  each merge is logged. Renaming two labels to one person yields one speaker.
+- **Banked transcripts are keyed by what the engine reads.** A Scribe job quit during cleanup
+  re-uploaded the whole hour on Resume because the key included the vocabulary hint text, which
+  the job's own glossary stage had changed. Keys now hold only the settings the engine in use
+  reads, with hints reduced to on/off, and a transcript banked under an older key formula is
+  still found by its engine and model.
+- **Interrupted jobs are reconciled at startup.** A job that was running when the app closed is
+  marked *Interrupted* rather than left showing *In progress* forever.
+- The main window can be resized below its old minimum width; the header and job buttons wrap.
+
+### Fixed
+
+- **Gemini Flash spent its output budget thinking** on cleanup batches (15,728 of 16,384 tokens
+  on one real batch) and truncated the JSON. Thinking is turned off for cleanup, with a fallback
+  when a model rejects the setting.
+- **MAI's phrase list is capped at 50**, undocumented; a 64-term glossary failed every request
+  with a 400. The app sends the 50 heaviest terms and logs how many were left out.
+- **Logout crashed the app** when the token had expired: a worker thread was destroyed while
+  running. Workers are now tracked and given a grace period at close.
+- Voiceprint embeddings were lost when a result was copied, queued or resumed; MAI's spacing
+  entries crashed speaker assignment; words in pauses got no speaker (now the nearest turn within
+  two seconds).
+
 - **Gemini 3.5 Transcribe** as a third transcription engine, alongside local Whisper and ElevenLabs
   Scribe. It transcribes and separates speakers in one pass and uses the same Google AI key as AI
   Cleanup. Verbatim mode is the default because it is the only one Google lets return speakers and
