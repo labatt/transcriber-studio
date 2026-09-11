@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "transcriber-studio"
 version = "0.1.0"
-description = "A local transcription workbench: denoise, VAD and vocabulary biasing in front of Whisper, with diarization, glossaries and an optional LLM cleanup pass."
+description = "Transcription workbench for PLAUD and local recordings. Engines: local Whisper, Microsoft MAI-Transcribe (Azure), Gemini 3.5 Transcribe and ElevenLabs Scribe, with denoise, VAD and vocabulary biasing from a shared glossary in front, speaker diarization with voiceprints, and an optional LLM cleanup pass via Anthropic, OpenAI, Google or local Ollama."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
