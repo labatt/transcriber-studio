@@ -26,7 +26,28 @@ from .job_cancel import check_cancel
 from .models import Recording, Source
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-HEX32_RE = re.compile(r"^([0-9a-f]{32})\s+(.*?)\s{2,}(\d{4}-\d{2}-\d{2})\s+(\S+)\s*$")
+#: Plaud CLI 0.3.11 (2026-08-20) prefixes every file id with "of_" and no
+#: longer accepts the bare 32-hex form it used before. The app stores the bare
+#: form: every audio-cache file, history row, queue entry, resume checkpoint and
+#: glossary file is named by it, and a recording must not become a stranger to
+#: its own cache because the CLI changed its spelling. So the prefix is stripped
+#: on the way in and put back on the way out to the CLI.
+FILE_ID_PREFIX = "of_"
+HEX32_RE = re.compile(
+    r"^(?:of_)?([0-9a-f]{32})\s+(.*?)\s{2,}(\d{4}-\d{2}-\d{2})\s+(\S+)\s*$"
+)
+
+
+def bare_id(file_id: str) -> str:
+    """The id as the app stores it: without the CLI's prefix."""
+    fid = (file_id or "").strip()
+    return fid[len(FILE_ID_PREFIX):] if fid.startswith(FILE_ID_PREFIX) else fid
+
+
+def cli_id(file_id: str) -> str:
+    """The id as the CLI now wants it: with the prefix, added once."""
+    fid = (file_id or "").strip()
+    return fid if fid.startswith(FILE_ID_PREFIX) else FILE_ID_PREFIX + fid
 KV_RE = re.compile(r"^\s*([a-z_]+):\s*(.*)$")
 URL_RE = re.compile(r"https?://\S+")
 
@@ -274,7 +295,7 @@ class PlaudClient:
 
     # ---- detail / audio ----------------------------------------------------
     def get_file(self, file_id: str) -> Recording:
-        out = self._run(["file", file_id])
+        out = self._run(["file", cli_id(file_id)])
         f: dict[str, str] = {}
         for line in out.splitlines():
             m = KV_RE.match(line)
@@ -282,7 +303,7 @@ class PlaudClient:
                 f[m.group(1)] = m.group(2).strip()
         return Recording(
             source=Source.PLAUD,
-            id=f.get("id", file_id),
+            id=bare_id(f.get("id", file_id)),
             name=f.get("name", file_id),
             date=(f.get("start_at", "") or f.get("created_at", ""))[:10],
             datetime=f.get("start_at", "") or f.get("created_at", ""),
@@ -313,7 +334,7 @@ class PlaudClient:
         last_error = ""
         for attempt in range(1, AUDIO_URL_ATTEMPTS + 1):
             try:
-                out = self._run(["audio", file_id])
+                out = self._run(["audio", cli_id(file_id)])
             except NotAuthenticated:
                 raise
             except PlaudError as e:
