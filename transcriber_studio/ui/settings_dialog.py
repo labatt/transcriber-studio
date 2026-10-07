@@ -152,12 +152,31 @@ class SettingsDialog(SheetDialog):
         self.el_audio_events.setChecked(settings.elevenlabs_tag_audio_events)
         elf.addRow(self.el_audio_events)
 
+        self.el_speakers = QComboBox()
+        self.el_speakers.addItem(
+            "Detect speakers here (pyannote) — voiceprints work", "local"
+        )
+        self.el_speakers.addItem(
+            "Let Scribe detect speakers — no voice data, no voiceprints", "scribe"
+        )
+        index = self.el_speakers.findData(settings.elevenlabs_speakers or "local")
+        self.el_speakers.setCurrentIndex(max(0, index))
+        self.el_speakers.setToolTip(
+            "Scribe's own speaker labels work at any length but carry no voice "
+            "data, so an enrolled voice can never be matched against them. "
+            "Detecting speakers here runs pyannote on Scribe's words, which is "
+            "what lets a recording come back with people's names on it. Needs a "
+            "HuggingFace token; without one Scribe labels the speakers itself."
+        )
+        elf.addRow("Speakers:", self.el_speakers)
+
         el_note = QLabel(
             "Choose this engine in the Options panel (\"Transcription engine\"). "
-            "Scribe transcribes and detects speakers in one pass, so the pyannote "
-            "settings below do not apply to it — the Speakers options and the "
-            "speaker-count maximum still do. Audio is uploaded to ElevenLabs and "
-            "billed to your ElevenLabs account."
+            "With speakers detected here, Scribe supplies the words and pyannote the "
+            "speakers, so the Speakers settings apply and enrolled voiceprints can "
+            "name people. With Scribe detecting speakers, only the speaker-count "
+            "maximum applies. Audio is uploaded to ElevenLabs and billed to your "
+            "ElevenLabs account."
         )
         el_note.setWordWrap(True)
         el_note.setStyleSheet("color: gray;")
@@ -1134,6 +1153,7 @@ class SettingsDialog(SheetDialog):
         self.s.elevenlabs_api_key = self.el_key.text().strip()
         self.s.elevenlabs_model = self.el_model.currentText()
         self.s.elevenlabs_tag_audio_events = self.el_audio_events.isChecked()
+        self.s.elevenlabs_speakers = self.el_speakers.currentData() or "local"
         self.s.gemini_model = self.gemini_model.currentText()
         self.s.gemini_mode = self.gemini_mode.currentData() or stt_gemini.DEFAULT_MODE
         self.s.mai_api_key = self.mai_key.text().strip()

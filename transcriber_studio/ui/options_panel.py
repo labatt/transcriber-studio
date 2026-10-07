@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import ai_providers, config, denoise, vad, vocab_bias
+from .. import ai_providers, config, denoise, stt_elevenlabs, vad, vocab_bias
 from ..config import Settings
 from ..transcriber import (
     ENGINE_ELEVENLABS,
@@ -411,11 +411,26 @@ class OptionsPanel(QWidget):
                     "Azure Foundry Speech resource in one of six regions."
                 )
         elif self.engine.currentData() == ENGINE_ELEVENLABS:
-            model = self.s.elevenlabs_model or "scribe_v1"
+            model = self.s.elevenlabs_model or stt_elevenlabs.DEFAULT_MODEL
             if self.s.elevenlabs_api_key.strip():
+                local = (self.s.elevenlabs_speakers or "local") == "local"
+                if local and self.s.hf_token.strip():
+                    speakers = (
+                        "Speakers are detected here with pyannote afterwards, so "
+                        "enrolled voiceprints can name them."
+                    )
+                elif local:
+                    speakers = (
+                        "Speaker detection comes from Scribe until a HuggingFace token "
+                        "is saved in Settings — without one, voiceprints cannot name anyone."
+                    )
+                else:
+                    speakers = (
+                        "Speaker detection comes from Scribe, which returns no voice "
+                        "data, so voiceprints cannot name anyone."
+                    )
                 self.engine_status.setText(
-                    f"Audio is uploaded to ElevenLabs ({model}). Speaker detection "
-                    "comes from Scribe — no HuggingFace token or GPU needed."
+                    f"Audio is uploaded to ElevenLabs ({model}). {speakers}"
                 )
             else:
                 self.engine_status.setText(

@@ -37,11 +37,16 @@ class TranscriptionWorker(QThread):
         recordings: list[Recording],
         start_row: int = 0,
         parent=None,
+        *,
+        speaker_names: dict[str, dict[str, str]] | None = None,
     ):
         super().__init__(parent)
         self.settings = settings
         self.recordings = recordings
         self.start_row = start_row
+        #: recording id -> {raw pyannote label -> name}, from the user having
+        #: listened to each speaker before this run (see SpeakerIdentifyWorker).
+        self.speaker_names = dict(speaker_names or {})
         self._cancel = False
 
     def cancel(self):
@@ -52,7 +57,7 @@ class TranscriptionWorker(QThread):
         return self._cancel
 
     def run(self):
-        runner = JobRunner(self.settings)
+        runner = JobRunner(self.settings, speaker_names=self.speaker_names)
         for i, rec in enumerate(self.recordings):
             row = self.start_row + i
             if self._cancel:
@@ -135,6 +140,108 @@ class DiarizationWorker(QThread):
             self.error.emit(row, "Speaker detection cancelled — the transcript is unchanged.")
         except Exception as e:
             self.error.emit(row, str(e))
+
+
+class SpeakerIdentifyWorker(QThread):
+    """Finds the speakers in one recording before it is transcribed.
+
+    The first half of a run on its own — download, denoise, pyannote — so the
+    window can play a few seconds of each voice and ask who it is. The answers
+    ride into the transcription that follows as ``speaker_names``.
+    """
+
+    log_item = Signal(int, str)
+    progress_item = Signal(int, float)
+    done = Signal(int, str, object)     # row, audio path, DiarizationResult
+    error = Signal(int, str)            # row, message
+    cancelled = Signal(int)             # row
+
+    def __init__(
+        self, settings: Settings, row: int, recording: Recording, parent=None,
+        *, min_speakers: int = 0, max_speakers: int = 0,
+    ):
+        super().__init__(parent)
+        self.settings = settings
+        self.row = row
+        self.recording = recording
+        self.min_speakers = min_speakers
+        self.max_speakers = max_speakers
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        runner = JobRunner(self.settings)
+        row = self.row
+        try:
+            audio_path, diarized = runner.detect_speakers(
+                self.recording,
+                min_speakers=self.min_speakers,
+                max_speakers=self.max_speakers,
+                progress_cb=lambda f, r=row: self.progress_item.emit(r, f),
+                log_cb=lambda m, r=row: self.log_item.emit(r, m),
+                should_cancel=lambda: self._cancel,
+            )
+            self.done.emit(row, audio_path, diarized)
+        except JobCancelled:
+            self.cancelled.emit(row)
+        except Exception as e:
+            self.error.emit(row, str(e))
+
+
+class DownloadWorker(QThread):
+    """Downloads recordings' audio and nothing else — no transcription.
+
+    Each file goes through the audio cache, so transcribing it later costs no
+    second download, and a copy is placed in the folder the user chose.
+    """
+
+    started_item = Signal(int, str)
+    progress_item = Signal(int, float)
+    log_item = Signal(int, str)
+    finished_item = Signal(int, object)    # row, JobResult (output_paths = the saved file)
+    skipped_item = Signal(int)
+    all_finished = Signal()
+
+    def __init__(
+        self, settings: Settings, recordings: list[Recording], dest_dir: str,
+        start_row: int = 0, parent=None,
+    ):
+        super().__init__(parent)
+        self.settings = settings
+        self.recordings = recordings
+        self.dest_dir = dest_dir
+        self.start_row = start_row
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def was_cancelled(self) -> bool:
+        return self._cancel
+
+    def run(self):
+        runner = JobRunner(self.settings)
+        for i, rec in enumerate(self.recordings):
+            row = self.start_row + i
+            if self._cancel:
+                self.skipped_item.emit(row)
+                continue
+            self.started_item.emit(row, "Downloading…")
+            try:
+                saved = runner.download_audio(
+                    rec, self.dest_dir,
+                    progress_cb=lambda f, r=row: self.progress_item.emit(r, f),
+                    log_cb=lambda m, r=row: self.log_item.emit(r, m),
+                    should_cancel=lambda: self._cancel,
+                )
+                self.finished_item.emit(row, JobResult(rec, [saved]))
+            except JobCancelled:
+                self.finished_item.emit(row, JobResult(rec, cancelled=True))
+            except Exception as e:
+                self.finished_item.emit(row, JobResult(rec, error=str(e)))
+        self.all_finished.emit()
 
 
 class CleanupWorker(QThread):

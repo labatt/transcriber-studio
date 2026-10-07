@@ -8,6 +8,37 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Identify speakers by ear before transcribing.** *Go with options…* next to Go opens a
+  dialog for this run only: how many people were in the room, whether to denoise, detect
+  speakers or run AI cleanup, and *Identify speakers first*. With that ticked, each recording's
+  speakers are detected before a word is transcribed and a dialog plays two to four short
+  samples of each voice, taken from far-apart parts of the recording, next to a name field.
+  The names go on the transcript — a name heard beats a name measured — and ticked voices are
+  stored as voiceprints, so the next recording names those people on its own. Speakers already
+  recognised from an enrolled voice arrive pre-filled. Detection runs once: the transcription
+  that follows reuses it from the cache. *…and stop there* does only the identification —
+  no engine, no files — for teaching the app a room full of voices; names given that way are
+  kept for the session and used by a later Go on the same recording. *Only the first N
+  minutes* (ten by default) cuts every recording before any stage sees it — a cheap way to
+  try an engine, a glossary or the denoiser on a long meeting; the cut is a stream copy and
+  is never mistaken for the full transcript when resuming.
+- **ElevenLabs Scribe with pyannote speakers.** Scribe now works the way MAI does: it supplies
+  the words and pyannote separates the speakers locally, so voiceprints work on ElevenLabs
+  transcripts too. Scribe's own speaker labels are still available from Settings → Engines, and
+  are used automatically when no HuggingFace token is saved. The default Scribe model is now
+  `scribe_v2`; v1 is deprecated upstream.
+- **Download audio** button: save the ticked PLAUD recordings' audio to a folder of your choice
+  without transcribing. The file also lands in the audio cache, so transcribing it later costs no
+  second download.
+
+### Fixed
+
+- **PLAUD recordings that are really Ogg/Opus.** PLAUD's cloud now serves Opus-in-Ogg under a
+  name ending in `.mp3`. Everything that chose a container or a MIME type from the filename —
+  the new first-N-minutes cut, Gemini's long-file splitting, Gemini's upload type — now reads
+  the format from the bytes instead. The cut also falls back to a lossless WAV when a stream
+  copy is impossible, and a zero-byte leftover from a failed cut is never reused.
+
 - **MAI-Transcribe-2** (Microsoft, via Azure Speech) as a fourth transcription engine. It takes a
   whole recording in one request (a 73-minute, 70 MB file went up unsplit), accepts up to 50
   vocabulary hints from the glossary, and was the most accurate engine on every recording in the

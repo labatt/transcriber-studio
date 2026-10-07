@@ -86,7 +86,11 @@ there is no configuration that quietly does nothing.
   first when the list has to be cut to fit the decoder.
 - **Voiceprints** — name a speaker once and tick *Remember this voice*; later recordings come back
   with the name instead of `Speaker 2`. Works with every engine whose speakers come from pyannote
-  (local Whisper and MAI). Managed from the **Speakers** button in the header.
+  (local Whisper, MAI and ElevenLabs). Managed from the **Speakers** button in the header.
+- **Identify speakers by ear** — *Go with options…* can detect the speakers first, play a few
+  samples of each voice, and let you name them before anything is transcribed. The names go on
+  the transcript and, if you tick the box, into the voiceprint store.
+- **Download audio** — save a PLAUD recording's audio to a folder without transcribing it.
 - **Rename recordings on the device** — edit a PLAUD recording's name in the list and, if you opt
   in, the new name is pushed back to your PLAUD account. Output files can be renamed after the fact
   too.
@@ -402,7 +406,11 @@ Two settings worth doing straight away:
 2. **Check the Options panel** on the right: engine, output formats, output folder.
 3. **Turn on the pipeline** (Audio pipeline group): denoise, VAD, biasing. All three are cheap.
 4. **Press Go.** The log reports each layer as it runs — which denoiser, how much non-speech the
-   VAD removed, how many vocabulary terms went in, which model and which device.
+   VAD removed, how many vocabulary terms went in, which model and which device. **Go with
+   options…** asks first: how many people were there, whether to identify them by ear before
+   transcribing (see [Speakers and voiceprints](#speakers-and-voiceprints)), and whether to run
+   only the first ten minutes — the cheap way to try an engine or a glossary on a long meeting.
+   **Download audio** saves the ticked PLAUD recordings to a folder and does nothing else.
 5. **When it finishes**, the Output column has buttons to open the folder and to rename the
    files. If speakers were detected, a rename dialog offers to put real names on them — that is
    what feeds the filename and the glossary — and a *Remember this voice* box next to each name
@@ -469,9 +477,24 @@ The **Speakers** button in the header opens the management dialog:
   a match is attempted; plus a log of every match decision the app has made, with a suggestion for
   where to set the threshold based on the scores it has seen.
 
-Voiceprints work with every engine whose speakers come from pyannote — local Whisper and MAI.
-ElevenLabs Scribe and Gemini separate speakers themselves and return no voice data, so on those
-engines speakers stay numbered per recording.
+**Identifying speakers before the run.** Press **Go with options…**, tick *Identify speakers
+first* and say how many people were in the room. The app downloads the audio, detects the
+speakers, and opens a dialog with two to four short samples of each voice — taken from far-apart
+parts of the recording, so a cough or an "mm-hm" cannot be the only evidence — next to a name
+field and a *Remember this voice* box (on by default where there is enough speech). Names you type
+go straight onto the transcript; a name you typed after listening beats anything the matcher would
+have guessed. Speakers the app already recognises arrive pre-filled. The transcription then runs
+with those names, and detection is not repeated: the run reads it back from the cache. *Skip
+naming* transcribes with numbered speakers; *Cancel run* stops before anything is transcribed.
+Tick *…and stop there* to do only the identification: no engine runs and nothing is written,
+which is the cheap way to teach the app everyone in a recording. Names given that way are kept
+for the session, so pressing Go on the same recording later uses them without asking again.
+
+Voiceprints work with every engine whose speakers come from pyannote — local Whisper, MAI, and
+ElevenLabs Scribe (by default Scribe supplies the words and pyannote the speakers; Settings →
+Engines can hand speaker detection back to Scribe, and it falls back to Scribe on its own when no
+HuggingFace token is saved). Gemini separates speakers itself and returns no voice data, so on
+that engine speakers stay numbered per recording.
 
 **Wrong speaker count?** The *at least / at most* limits in the Options panel persist between
 jobs, so a meeting of six can come back as two because the last recording was a call. Select the
@@ -546,7 +569,7 @@ Chosen per run in the Options panel.
 | **Local Whisper** | your machine | pyannote, separately | hotwords, every window | faster-whisper; a HuggingFace token for speakers |
 | **MAI-Transcribe-2** | Azure | pyannote, separately (see below) | phrase list, 50 terms | an Azure Speech key in one of six regions; a HuggingFace token for speakers |
 | **Gemini 3.5 Transcribe** | Google | in the same pass | none — the API refuses them alongside speakers or timestamps | a Google AI key — the same one AI Cleanup uses |
-| **ElevenLabs Scribe** | ElevenLabs | in the same pass | none | an ElevenLabs key |
+| **ElevenLabs Scribe** | ElevenLabs | pyannote, separately (or Scribe's own) | none | an ElevenLabs key; a HuggingFace token for pyannote speakers |
 
 Only the local engine gets the full [audio pipeline](#what-it-does) in front of it. Denoising
 still applies to every engine — the enhanced audio is what gets uploaded — and the shared glossary

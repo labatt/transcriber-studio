@@ -8,10 +8,12 @@ Kept UI-agnostic so it can be driven from a QThread worker or a CLI/test.
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import (
+    audio_utils,
     denoise,
     diarization,
     filename_builder,
@@ -122,15 +124,22 @@ def remove_superseded_outputs(old_paths: list[str], new_paths: list[str]) -> lis
 
 
 class JobRunner:
-    def __init__(self, settings: Settings, client: PlaudClient | None = None):
+    def __init__(
+        self, settings: Settings, client: PlaudClient | None = None,
+        *, speaker_names: dict[str, dict[str, str]] | None = None,
+    ):
         self.s = settings
         self.client = client or PlaudClient()
         self.transcriber = Transcriber()
+        #: recording id -> {raw pyannote label -> name}, for recordings whose
+        #: speakers the user identified by ear before the run began.
+        self.speaker_names: dict[str, dict[str, str]] = dict(speaker_names or {})
 
     def _opts(self, recording: Recording | None = None) -> TranscribeOptions:
         names = [n.strip() for n in self.s.channel_names.split(",") if n.strip()]
         return TranscribeOptions(
             denoise=denoise.resolve(self.s),
+            limit_minutes=int(getattr(self.s, "limit_minutes", 0) or 0),
             vad_enabled=self.s.vad_enabled,
             vad_parameters=vad.parameters(self.s),
             hotwords=self._hotwords(recording),
@@ -153,6 +162,11 @@ class JobRunner:
             engine=self.s.stt_engine,
             elevenlabs_api_key=self.s.elevenlabs_api_key,
             elevenlabs_model=self.s.elevenlabs_model,
+            elevenlabs_speakers=self.s.elevenlabs_speakers,
+            known_speakers=(
+                getattr(self, "speaker_names", {}).get(recording.id)
+                if recording is not None else None
+            ),
             gemini_api_key=self.s.ai_key_google,
             gemini_model=self.s.gemini_model,
             gemini_mode=self.s.gemini_mode,
@@ -289,6 +303,72 @@ class JobRunner:
             Transcriber._speaker_voice_data(diarized, names)
         )
         return result
+
+    def detect_speakers(
+        self, recording: Recording, *, min_speakers: int | None = None,
+        max_speakers: int | None = None, progress_cb=None, log_cb=None,
+        should_cancel: ShouldCancel = None,
+    ) -> tuple[str, diarization.DiarizationResult]:
+        """Who spoke when, before anything has been transcribed.
+
+        The first half of a run on its own: fetch the audio, clean it the way
+        the run will, and separate the speakers. What comes back is enough to
+        cut a few seconds of each voice for a person to listen to and name.
+        Nothing is transcribed and nothing is written.
+
+        The run that follows asks pyannote the same question about the same
+        file with the same bounds, and the diarization cache answers it, so
+        the speakers are found once even though they are used twice.
+        """
+        if not self.s.hf_token:
+            raise RuntimeError(
+                "Identifying speakers needs a HuggingFace token. Add one in Settings."
+            )
+        if not diarization.is_available():
+            raise RuntimeError(
+                "pyannote.audio is not installed. Run: pip install pyannote.audio"
+            )
+        lo = self.s.min_speakers if min_speakers is None else min_speakers
+        hi = self.s.max_speakers if max_speakers is None else max_speakers
+        log = log_cb or (lambda _m: None)
+        audio_path = self._ensure_audio(recording, progress_cb, log_cb, should_cancel)
+        check_cancel(should_cancel, log_cb, message="Cancelled before speaker detection.")
+        log(f"Detecting speakers ({describe_bounds(lo, hi)}) so you can name them…")
+        diar = diarization.Diarizer(self.s.hf_token, self.s.device)
+        diarized = diar.diarize(
+            audio_path, lo, hi,
+            progress_cb=(lambda f: progress_cb(0.40 + f * 0.60)) if progress_cb else None,
+            log_cb=log_cb, should_cancel=should_cancel,
+        )
+        return audio_path, diarized
+
+    def download_audio(
+        self, recording: Recording, dest_dir: str, *, progress_cb=None, log_cb=None,
+        should_cancel: ShouldCancel = None,
+    ) -> str:
+        """Fetch a recording's audio and put a copy where the user asked.
+
+        The download itself goes through the cache, so a later transcription of
+        the same recording costs no second download. The copy in ``dest_dir``
+        is the user's: named after the recording, never overwritten.
+        """
+        source = self._source_audio(recording, progress_cb, log_cb, should_cancel)
+        check_cancel(should_cancel, log_cb, message="Download cancelled.")
+        stem = filename_builder.sanitize(
+            f"{recording.date}_{recording.display_name}" if recording.date
+            else recording.display_name,
+            self.s.sanitize_names,
+        )
+        ext = Path(source).suffix.lstrip(".") or "mp3"
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+        dest = filename_builder.unique_path(dest_dir, stem, ext, overwrite=False)
+        if Path(source).resolve() != dest.resolve():
+            shutil.copy2(source, dest)
+        if progress_cb:
+            progress_cb(1.0)
+        if log_cb:
+            log_cb(f"Saved audio to {dest}")
+        return str(dest)
 
     def apply_ai_cleanup(
         self,
@@ -476,6 +556,9 @@ class JobRunner:
         of them should be looking at a different signal than the decoder.
         """
         source = self._source_audio(recording, progress_cb, log_cb, should_cancel)
+        limit = int(getattr(self.s, "limit_minutes", 0) or 0)
+        if limit > 0:
+            source = self._first_minutes(source, limit, log_cb, should_cancel)
         # Downloading owns the first 30% of the bar; give denoising the next
         # slice rather than leaving it looking stalled on a long recording.
         return denoise.enhance(
@@ -488,6 +571,55 @@ class JobRunner:
             # must not hand back the downmix it produces by default.
             preserve_channels=self.s.channel_mode == "per_channel",
         )
+
+    def _first_minutes(
+        self, source: str, minutes: int, log_cb, should_cancel: ShouldCancel = None,
+    ) -> str:
+        """A copy of the audio cut to its first ``minutes``, or the original
+        when it is already no longer than that.
+
+        Lives in the audio cache next to the downloads, named for its length,
+        and is reused while the source is unchanged — so trying three engines
+        on the same ten minutes cuts the file once.
+        """
+        check_cancel(should_cancel, log_cb, message="Cancelled before trimming.")
+        seconds = minutes * 60.0
+        duration = audio_utils.probe(source)["duration"]
+        if duration and duration <= seconds + 0.5:
+            if log_cb:
+                log_cb(
+                    f"The recording is {duration / 60:.1f} min, within the {minutes}-minute "
+                    "limit — using all of it."
+                )
+            return source
+        src = Path(source)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        stem = CACHE_DIR / f"{src.stem}.first{minutes}m"
+        # The extension is whatever the cut was actually written in (see
+        # audio_utils.trim_to), so look for any of them.
+        existing = sorted(CACHE_DIR.glob(f"{stem.name}.*"))
+        fresh = ""
+        for candidate in existing:
+            try:
+                if candidate.stat().st_size > 0 and candidate.stat().st_mtime >= src.stat().st_mtime:
+                    fresh = str(candidate)
+                    break
+            except OSError:
+                continue
+        if not fresh:
+            if not audio_utils.have_ffmpeg():
+                raise RuntimeError(
+                    "Cutting the recording to its first minutes needs ffmpeg on PATH."
+                )
+            for stale in existing:
+                stale.unlink(missing_ok=True)
+            fresh = audio_utils.trim_to(source, seconds, str(stem))
+        if log_cb:
+            log_cb(
+                f"Using only the first {minutes} minutes of the recording "
+                f"(it is {duration / 60:.0f} min long)."
+            )
+        return fresh
 
     def _source_audio(
         self, recording: Recording, progress_cb, log_cb, should_cancel: ShouldCancel = None

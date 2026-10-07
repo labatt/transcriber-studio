@@ -66,8 +66,15 @@ def ffmpeg_path() -> str:
 
 
 def probe(path: str) -> dict:
-    """Return {'channels': int, 'duration': float} (best effort)."""
-    info = {"channels": 1, "duration": 0.0}
+    """Return {'channels': int, 'duration': float, 'format': str} (best effort).
+
+    ``format`` is ffprobe's container name ("ogg", "mp3", "wav", …), read from
+    the bytes rather than the filename. The two disagree more often than one
+    would hope: Plaud's cloud serves Opus-in-Ogg under a name ending in
+    ``.mp3``, and anything that picks a container from the extension then
+    writes a file no decoder can read.
+    """
+    info = {"channels": 1, "duration": 0.0, "format": ""}
     try:
         out = subprocess.run(
             [FFPROBE, "-v", "quiet", "-print_format", "json",
@@ -79,10 +86,42 @@ def probe(path: str) -> dict:
             if s.get("codec_type") == "audio":
                 info["channels"] = int(s.get("channels", 1))
                 break
-        info["duration"] = float(data.get("format", {}).get("duration", 0.0) or 0.0)
+        fmt = data.get("format", {})
+        info["duration"] = float(fmt.get("duration", 0.0) or 0.0)
+        info["format"] = str(fmt.get("format_name", "") or "")
     except Exception:
         pass
     return info
+
+
+#: ffprobe's container names, as it reports them, to the extension a file of
+#: that kind should carry. Comma-separated entries are ffprobe's own spelling
+#: for demuxers that cover several formats.
+_CONTAINER_EXTENSIONS = {
+    "ogg": ".ogg",
+    "mp3": ".mp3",
+    "wav": ".wav",
+    "flac": ".flac",
+    "aac": ".aac",
+    "asf": ".wma",
+    "matroska,webm": ".webm",
+    "mov,mp4,m4a,3gp,3g2,mj2": ".m4a",
+}
+
+
+def container_extension(path: str) -> str:
+    """The extension that matches what is actually in the file.
+
+    Falls back to the filename's own extension when ffprobe cannot say,
+    which keeps the old behaviour for anything it does not recognise.
+    """
+    fmt = probe(path).get("format", "")
+    if fmt in _CONTAINER_EXTENSIONS:
+        return _CONTAINER_EXTENSIONS[fmt]
+    for name, ext in _CONTAINER_EXTENSIONS.items():
+        if fmt and fmt.split(",")[0] == name.split(",")[0]:
+            return ext
+    return Path(path).suffix or ".wav"
 
 
 def split_channels(path: str, names: list[str] | None = None) -> list[tuple[str, str]]:
@@ -116,6 +155,37 @@ def split_channels(path: str, names: list[str] | None = None) -> list[tuple[str,
         )
         results.append((label, str(out)))
     return results
+
+
+def trim_to(path: str, seconds: float, dest_stem: str, timeout: float = FFMPEG_TIMEOUT) -> str:
+    """The first ``seconds`` of a file, written next to ``dest_stem``.
+
+    Returns the path written, which is ``dest_stem`` plus the extension of
+    the container the audio is *actually* in — never the one the source file
+    happens to be named with. A stream copy where that is possible, so
+    nothing about the audio changes except where it stops; a lossless WAV
+    decode where it is not, so the cut always exists.
+    """
+    ext = container_extension(path)
+    dest = f"{dest_stem}{ext}"
+    try:
+        subprocess.run(
+            [FFMPEG, "-y", "-i", path, "-t", f"{float(seconds):.3f}", "-c", "copy", dest],
+            capture_output=True, check=True, timeout=timeout,
+        )
+        if Path(dest).stat().st_size > 0:
+            return dest
+    except (subprocess.CalledProcessError, OSError):
+        pass
+    # A failed copy leaves an empty file; it must not be found later and
+    # taken for the real thing.
+    Path(dest).unlink(missing_ok=True)
+    dest = f"{dest_stem}.wav"
+    subprocess.run(
+        [FFMPEG, "-y", "-i", path, "-t", f"{float(seconds):.3f}", "-vn", dest],
+        capture_output=True, check=True, timeout=timeout,
+    )
+    return dest
 
 
 def load_waveform_for_diarization(path: str) -> dict[str, Any]:
@@ -228,7 +298,9 @@ def split_for_upload(
         log(f"Splitting into {len(spans)} part(s) — {landed} of {len(cuts)} "
             f"cut(s) landed on a pause.")
 
-    suffix = Path(path).suffix or ".wav"
+    # From the bytes, not the name: a stream copy into the wrong container
+    # writes an empty file, and the upload that follows fails as "corrupted".
+    suffix = container_extension(path)
     parts: list[tuple[str, float, float]] = []
     for index, (start, seam, end) in enumerate(spans):
         part = Path(out_dir) / f"part{index:03d}{suffix}"

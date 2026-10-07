@@ -113,8 +113,13 @@ class Settings:
 
     # --- ElevenLabs Scribe (cloud STT; key stored locally only) ---
     elevenlabs_api_key: str = ""
-    elevenlabs_model: str = "scribe_v1"
+    elevenlabs_model: str = "scribe_v2"
     elevenlabs_tag_audio_events: bool = False   # mark laughter, applause, etc.
+    # Who separates the speakers. Local pyannote on Scribe's words returns
+    # the voice data enrolled voiceprints need; Scribe's own labels do not.
+    # Local applies only when a HuggingFace token is saved — without one
+    # Scribe keeps doing it rather than nobody.
+    elevenlabs_speakers: str = "local"  # local | scribe
 
     # --- Gemini (cloud STT; key stored locally only) ---
     # Shares the Google AI key with AI Cleanup: it is the same account.
@@ -214,6 +219,13 @@ class Settings:
     # Id of a glossary in the shared library (transcriber_studio.glossary_store) that new jobs
     # read from and write back to. Empty => each recording keeps its own.
     glossary_shared_id: str = ""
+
+    # --- this run only: cut every recording to its first N minutes ---
+    # Set by "Go with options…" on a per-run copy of the settings, never from
+    # the Settings dialog, so it is 0 on disk and in every ordinary run. For
+    # trying an engine or a glossary on a long meeting without paying for the
+    # whole thing.
+    limit_minutes: int = 0
 
     # --- audio front-end: denoise before anything else sees the audio ---
     # On hard audio this buys more than the model choice does; see transcriber_studio.denoise.

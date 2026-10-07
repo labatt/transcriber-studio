@@ -238,6 +238,9 @@ def _decode_fields(opts: Any) -> list[str]:
         ",".join(getattr(opts, "channel_names", None) or []),
         # The denoiser changes what every engine hears, so it stays for all.
         str(getattr(opts, "denoise", "")),
+        # So does cutting the recording short: ten minutes of a meeting is
+        # not a transcript of the meeting, and must never be restored as one.
+        f"limit={int(getattr(opts, 'limit_minutes', 0) or 0)}",
     ]
     hints = bool(getattr(opts, "hotwords", ""))
     if engine == "local":
@@ -273,6 +276,16 @@ def _speaker_fields(opts: Any) -> list[str]:
     engine = str(getattr(opts, "engine", "local") or "local")
     diarized = str(getattr(opts, "diarization_enabled", True))
     if engine == "elevenlabs":
+        if (
+            getattr(opts, "diarization_enabled", True)
+            and str(getattr(opts, "elevenlabs_speakers", "local") or "local") == "local"
+            and str(getattr(opts, "hf_token", "") or "").strip()
+        ):
+            # pyannote draws the speakers, so both bounds shape the result.
+            return [
+                diarized, "local",
+                str(getattr(opts, "min_speakers", 0)), str(getattr(opts, "max_speakers", 0)),
+            ]
         # Scribe takes an upper bound on speakers and nothing else.
         return [diarized, str(getattr(opts, "max_speakers", 0))]
     if engine == "gemini":

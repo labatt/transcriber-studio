@@ -128,7 +128,24 @@ def model_label(model_id: str) -> str:
     return model_id or DEFAULT_MODEL
 
 
+_MIME_BY_CONTAINER = {
+    ".ogg": "audio/ogg", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+    ".aac": "audio/aac", ".m4a": "audio/mp4", ".webm": "audio/webm",
+}
+
+
 def mime_type_for(path: str) -> str:
+    """What the file is, from its bytes first and its name second.
+
+    Plaud's cloud serves Opus-in-Ogg under a ``.mp3`` name; telling Gemini
+    that is MPEG audio is a lie it may or may not forgive.
+    """
+    from . import audio_utils
+
+    if audio_utils.have_ffmpeg():
+        by_content = _MIME_BY_CONTAINER.get(audio_utils.container_extension(path).lower())
+        if by_content:
+            return by_content
     guessed, _ = mimetypes.guess_type(path)
     if guessed and guessed.startswith("audio/"):
         return guessed

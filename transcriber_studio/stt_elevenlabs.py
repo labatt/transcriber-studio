@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import requests
@@ -28,7 +29,8 @@ ACCOUNT_URL = "https://api.elevenlabs.io/v1/user/subscription"
 
 #: Scribe models, newest first. The API rejects anything else.
 MODELS = ["scribe_v2", "scribe_v1", "scribe_v1_experimental"]
-DEFAULT_MODEL = "scribe_v1"
+#: scribe_v1 is deprecated upstream; ElevenLabs asks for v2.
+DEFAULT_MODEL = "scribe_v2"
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024      # 5 GB, per the API docs
 MAX_SPEAKERS = 32
@@ -186,6 +188,42 @@ def transcribe(
     should_cancel: ShouldCancel = None,
 ) -> TranscriptResult:
     """Transcribe one file with Scribe, returning the app's own result type."""
+    result, _words = _transcribe_with_words(
+        recording, audio_path, opts, progress_cb, log_cb, should_cancel
+    )
+    return result
+
+
+def decode(
+    recording: Recording,
+    audio_path: str,
+    opts,
+    progress_cb=None,
+    log_cb=None,
+    should_cancel: ShouldCancel = None,
+) -> tuple[list[Segment], str, list[dict]]:
+    """The words, without speakers: Scribe standing in for the Whisper decoder.
+
+    Returns the same ``(segments, language, words)`` triple the local decoder
+    does, so the rest of the local pipeline — pyannote, per-word speaker
+    assignment, voiceprints — runs on top of it unchanged. Scribe's own speaker
+    labels never leave the API: they carry no voice data, so an enrolled voice
+    could never be matched against them. pyannote's clusters can.
+    """
+    plain = SimpleNamespace(
+        **{name: getattr(opts, name) for name in dir(opts) if not name.startswith("_")}
+    )
+    plain.diarization_enabled = False
+    result, words = _transcribe_with_words(
+        recording, audio_path, plain, progress_cb, log_cb, should_cancel
+    )
+    return result.segments, result.language, words
+
+
+def _transcribe_with_words(
+    recording: Recording, audio_path: str, opts, progress_cb, log_cb, should_cancel,
+) -> tuple[TranscriptResult, list[dict]]:
+    """The shared body of transcribe() and decode(): one request, parsed."""
 
     def log(msg):
         if log_cb:
@@ -224,10 +262,11 @@ def transcribe(
         log("ElevenLabs found no speaker labels — the audio may be a single voice.")
     if progress_cb:
         progress_cb(1.0)
-    return TranscriptResult(
+    result = TranscriptResult(
         recording=recording,
         segments=segments,
         language=_language(data.get("language_code", "")),
         model=model_label(model_id),
         speakers=speakers,
     )
+    return result, words

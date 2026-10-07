@@ -11,6 +11,8 @@ from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -50,15 +52,25 @@ from ..jobs import (
 )
 from ..models import Recording, Source
 from ..queue_store import clear_queue_file, load_queue, save_queue
-from ..workers import AccountWorker, CleanupWorker, DiarizationWorker, TranscriptionWorker
+from ..run_plan import RunPlan
+from ..workers import (
+    AccountWorker,
+    CleanupWorker,
+    DiarizationWorker,
+    DownloadWorker,
+    SpeakerIdentifyWorker,
+    TranscriptionWorker,
+)
 from . import theme
 from .ai_cleanup_dialog import AICleanupDialog
 from .flow_layout import FlowLayout
 from .glossary_dialog import GlossaryLibraryDialog
+from .identify_dialog import SpeakerIdentifyDialog
 from .local_files_tab import LocalFilesTab
 from .options_panel import OptionsPanel
 from .recordings_tab import RecordingsTab
 from .rename_dialog import SpeakerRenameDialog
+from .run_options_dialog import RunOptionsDialog
 from .settings_dialog import SettingsDialog
 from .setup_wizard import SetupWizard
 from .speaker_count_dialog import SpeakerCountDialog
@@ -168,6 +180,16 @@ class MainWindow(QMainWindow):
         self._worker: TranscriptionWorker | None = None
         self._diar_worker: DiarizationWorker | None = None
         self._cleanup_worker: CleanupWorker | None = None
+        self._identify_worker: SpeakerIdentifyWorker | None = None
+        self._download_worker: DownloadWorker | None = None
+        # A run that identifies speakers first is a chain: one detection and
+        # one dialog per recording, then the transcription of them all. This
+        # holds the chain's state between steps; None when no chain is running.
+        self._identify_context: dict | None = None
+        # Names given in an identify-only run, kept for the session so that a
+        # later Go on the same recording does not ask again. Keyed by
+        # recording id, then pyannote's raw label.
+        self._session_speaker_names: dict[str, dict[str, str]] = {}
         self._acct_worker: AccountWorker | None = None
         # Every worker thread currently running. A QThread collected while its
         # thread is still going makes Qt abort the process outright — no
@@ -318,10 +340,30 @@ class MainWindow(QMainWindow):
         self.start_btn.setDefault(False)
         self.start_btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.start_btn.clicked.connect(self._start)
+        self.start_opts_btn = QPushButton("Go with options…")
+        self.start_opts_btn.setToolTip(
+            "Choose what this run does first: identify the speakers by ear before "
+            "transcribing, say how many people were there, skip the denoiser or the "
+            "AI pass. Applies to this run only."
+        )
+        self.start_opts_btn.setEnabled(False)
+        self.start_opts_btn.setAutoDefault(False)
+        self.start_opts_btn.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.start_opts_btn.clicked.connect(self._start_with_options)
+        self.download_btn = QPushButton("Download audio")
+        self.download_btn.setToolTip(
+            "Save the selected PLAUD recordings' audio to a folder of your choice, "
+            "without transcribing anything."
+        )
+        self.download_btn.setEnabled(False)
+        self.download_btn.setAutoDefault(False)
+        self.download_btn.clicked.connect(self._download_selected)
         self.cancel_btn = QPushButton("Cancel"); self.cancel_btn.setEnabled(False)
         self.cancel_btn.setAutoDefault(False)
         self.cancel_btn.clicked.connect(self._cancel)
         action_row.addWidget(self.start_btn)
+        action_row.addWidget(self.start_opts_btn)
+        action_row.addWidget(self.download_btn)
         action_row.addWidget(self.cancel_btn)
         action_row.addStretch()
         outer.addLayout(action_row)
@@ -404,6 +446,11 @@ class MainWindow(QMainWindow):
             (self._worker is not None and self._worker.isRunning())
             or (self._diar_worker is not None and self._diar_worker.isRunning())
             or (self._cleanup_worker is not None and self._cleanup_worker.isRunning())
+            or (self._identify_worker is not None and self._identify_worker.isRunning())
+            or (self._download_worker is not None and self._download_worker.isRunning())
+            # Between one recording's dialog and the next detection nothing is
+            # running, but the run is still in progress.
+            or self._identify_context is not None
         )
 
     def _selected_job_rows(self) -> list[int]:
@@ -665,10 +712,29 @@ class MainWindow(QMainWindow):
         return recs
 
     def _start(self):
+        self._begin_run(None)
+
+    def _start_with_options(self):
         recs = self._collect_selection()
         if not recs:
             QMessageBox.information(self, "Nothing selected",
                                     "Select Plaud recordings (checkboxes) or add local files first.")
+            return
+        # The dialog starts from the panel's current choices, not last run's.
+        self.options.apply_to(self.settings)
+        dlg = RunOptionsDialog(self.settings, recs, self)
+        if not dlg.exec():
+            return
+        self._begin_run(dlg.plan())
+
+    def _begin_run(self, plan: RunPlan | None):
+        recs = self._collect_selection()
+        if not recs:
+            QMessageBox.information(self, "Nothing selected",
+                                    "Select Plaud recordings (checkboxes) or add local files first.")
+            return
+        if plan and plan.identify_only:
+            self._begin_identify_only(recs, plan)
             return
 
         already_done = self._already_transcribed(recs)
@@ -698,19 +764,74 @@ class MainWindow(QMainWindow):
             return
         self.options.apply_to(self.settings)
         config.save(self.settings)
+        # A plan is this run's departure from the saved defaults; it lives on
+        # a copy so the Options panel is exactly as the user left it afterwards.
+        run_settings = plan.apply(self.settings) if plan else self.settings
 
         self._job_errors.clear()
         start_row = self.queue.rowCount()
         self._append_queue_rows(recs, start_row)
 
         self.start_btn.setEnabled(False)
+        self.start_opts_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
-        self._log(f"Starting {len(recs)} job(s). Model={self.settings.model}, "
-                  f"formats={','.join(self.settings.formats)}, "
-                  f"diarization={'on' if self.settings.diarization_enabled else 'off'}.")
+        if plan:
+            self._log(f"Run options: {plan.describe()}.")
+        self._log(f"Starting {len(recs)} job(s). Model={run_settings.model}, "
+                  f"formats={','.join(run_settings.formats)}, "
+                  f"diarization={'on' if run_settings.diarization_enabled else 'off'}.")
 
+        if plan and plan.identify_speakers:
+            self._begin_identification(recs, start_row, run_settings, plan.bounds)
+            return
+        self._launch_run(recs, start_row, run_settings, {})
+
+    def _begin_identify_only(self, recs: list[Recording], plan: RunPlan):
+        """Detect, listen, name, remember — and stop. No engine, no files.
+
+        The engine and cleanup checks are skipped on purpose: nothing here
+        needs an API key, and refusing to teach the app a voice because the
+        ElevenLabs key is missing would be absurd.
+        """
+        self.options.apply_to(self.settings)
+        config.save(self.settings)
+        run_settings = plan.apply(self.settings)
+        self._job_errors.clear()
+        start_row = self.queue.rowCount()
+        # Not a transcription, so the history must not call them queued.
+        self._append_queue_rows(recs, start_row, record=False)
+        self.start_btn.setEnabled(False)
+        self.start_opts_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self._log(f"Run options: {plan.describe()}.")
+        self._begin_identification(
+            recs, start_row, run_settings, plan.bounds, identify_only=True,
+        )
+
+    def _launch_run(
+        self, recs: list[Recording], start_row: int, run_settings: Settings,
+        speaker_names: dict[str, dict[str, str]],
+    ):
+        # Names from an earlier identify-only pass this session fill in for
+        # any recording this run did not just ask about.
+        merged = {
+            rec.id: self._session_speaker_names[rec.id]
+            for rec in recs if rec.id in self._session_speaker_names
+        }
+        merged.update(speaker_names)
+        for rec in recs:
+            if rec.id in merged and rec.id not in speaker_names:
+                self._log(
+                    f"[{rec.display_name}] using the speaker names from the earlier "
+                    "identification."
+                )
+        speaker_names = merged
         self._worker = self._track(
-            TranscriptionWorker(self.settings, recs, start_row=start_row)
+            TranscriptionWorker(
+                run_settings, recs, start_row=start_row, speaker_names=speaker_names,
+            )
         )
         self._worker.started_item.connect(self._on_item_started)
         self._worker.progress_item.connect(self._on_item_progress)
@@ -719,6 +840,211 @@ class MainWindow(QMainWindow):
         self._worker.skipped_item.connect(self._on_item_skipped)
         self._worker.all_finished.connect(self._on_all_finished)
         self._worker.start()
+        self._update_job_actions()
+
+    # ---- identifying speakers before a run -----------------------------
+    def _begin_identification(
+        self, recs: list[Recording], start_row: int, run_settings: Settings,
+        bounds: tuple[int, int], *, identify_only: bool = False,
+    ):
+        """Detect each recording's speakers, ask who they are, then transcribe.
+
+        One recording at a time: detection runs in a worker, the dialog runs
+        on the UI thread, and the next detection starts when the dialog
+        closes. The names collected ride into the transcription run, keyed by
+        recording, and the diarization cache means pyannote is not run twice.
+        """
+        self._identify_context = {
+            "recs": recs, "start_row": start_row, "settings": run_settings,
+            "bounds": bounds, "names": {}, "pending": list(enumerate(recs)),
+            "identify_only": identify_only, "summary": {},
+        }
+        self._identify_next()
+
+    def _identify_next(self):
+        ctx = self._identify_context
+        if ctx is None:
+            return
+        if not ctx["pending"]:
+            self._identify_context = None
+            self._processing_row = None
+            if ctx["identify_only"]:
+                self._finish_identify_only(ctx)
+                return
+            self._launch_run(ctx["recs"], ctx["start_row"], ctx["settings"], ctx["names"])
+            return
+        index, rec = ctx["pending"].pop(0)
+        row = ctx["start_row"] + index
+        self._processing_row = row
+        self._progress_started.pop(row, None)
+        self._set_status(row, "Identifying speakers…")
+        lo, hi = ctx["bounds"]
+        self._identify_worker = self._track(SpeakerIdentifyWorker(
+            ctx["settings"], row, rec, min_speakers=lo, max_speakers=hi,
+        ))
+        self._identify_worker.log_item.connect(self._on_item_log)
+        self._identify_worker.progress_item.connect(self._on_item_progress)
+        self._identify_worker.done.connect(self._on_identified)
+        self._identify_worker.error.connect(self._on_identify_error)
+        self._identify_worker.cancelled.connect(self._on_identify_cancelled)
+        self._identify_worker.start()
+        self._update_job_actions()
+
+    def _on_identified(self, row: int, audio_path: str, diarized):
+        ctx = self._identify_context
+        if ctx is None:
+            return
+        rec = self._queue_recordings[row]
+        if not getattr(diarized, "turns", None):
+            self._log(f"[{rec.display_name}] no speakers were found to identify.")
+            self._identify_next()
+            return
+        dlg = SpeakerIdentifyDialog(
+            audio_path, diarized, ctx["settings"], self, recording_name=rec.display_name,
+        )
+        code = dlg.exec()
+        if code == QDialog.DialogCode.Rejected:
+            self._abort_identification("Run cancelled while identifying speakers.")
+            return
+        found = len({t.speaker for t in diarized.turns})
+        named: dict[str, str] = {}
+        remembered: list[str] = []
+        if code == SpeakerIdentifyDialog.SKIPPED:
+            self._log(f"[{rec.display_name}] speakers left numbered.")
+        else:
+            remembered = dlg.apply_enrollments(log=self._log, source=rec.display_name)
+            named = dlg.names()
+            if named:
+                ctx["names"][rec.id] = named
+                self._session_speaker_names[rec.id] = named
+                self._log(
+                    f"[{rec.display_name}] {len(named)} speaker(s) named: "
+                    + ", ".join(sorted(named.values()))
+                )
+        ctx["summary"][row] = (found, len(named), len(remembered))
+        self._set_status(
+            row, f"Speakers identified · {found} found, {len(named)} named, "
+                 f"{len(remembered)} remembered",
+        )
+        self._identify_next()
+
+    def _finish_identify_only(self, ctx: dict):
+        """The identify-only run is over: say what was learned and stand down."""
+        for index, _rec in enumerate(ctx["recs"]):
+            row = ctx["start_row"] + index
+            found, named, remembered = ctx["summary"].get(row, (0, 0, 0))
+            status = (
+                f"Identified · {found} found, {named} named, {remembered} remembered"
+                if found else "Identified · no speakers found"
+            )
+            self._set_status(row, status)
+            self._set_queue_status(row, status)
+            self._end_determinate_progress(row)
+        self.cancel_btn.setEnabled(False)
+        total_remembered = sum(r for _f, _n, r in ctx["summary"].values())
+        self._log(
+            f"Speaker identification finished — {total_remembered} voice(s) remembered, "
+            "nothing transcribed."
+        )
+        self._update_go_button()
+        self._update_job_actions()
+
+    def _on_identify_error(self, row: int, message: str):
+        # The transcription itself may still succeed, and the user asked for
+        # it, so the run carries on without names for this recording.
+        name = self._queue_recordings[row].display_name if row < len(self._queue_recordings) else row
+        self._log(f"[{name}] could not identify speakers: {message} — transcribing anyway.")
+        self._identify_next()
+
+    def _on_identify_cancelled(self, row: int):
+        self._abort_identification("Run cancelled while identifying speakers.")
+
+    def _abort_identification(self, message: str):
+        ctx = self._identify_context
+        self._identify_context = None
+        if ctx is not None:
+            for index, _rec in enumerate(ctx["recs"]):
+                row = ctx["start_row"] + index
+                if row not in self._results:
+                    self._on_item_skipped(row)
+        self._processing_row = None
+        self.cancel_btn.setEnabled(False)
+        self._log(message)
+        self._persist_queue()
+        self._update_go_button()
+        self._update_job_actions()
+
+    # ---- downloading audio without transcribing ------------------------
+    def _download_selected(self):
+        recs = [r for r in self._collect_selection() if r.source == Source.PLAUD]
+        if not recs:
+            QMessageBox.information(
+                self, "Download audio",
+                "Tick one or more PLAUD recordings first. Local files are already on disk.",
+            )
+            return
+        start_in = self.settings.output_dir or str(Path.home())
+        dest = QFileDialog.getExistingDirectory(self, "Save audio to", start_in)
+        if not dest:
+            return
+        start_row = self.queue.rowCount()
+        self._append_queue_rows(recs, start_row, record=False)
+        self.start_btn.setEnabled(False)
+        self.start_opts_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self._log(f"Downloading {len(recs)} recording(s) to {dest} — nothing will be transcribed.")
+        self._download_worker = self._track(
+            DownloadWorker(self.settings, recs, dest, start_row=start_row)
+        )
+        self._download_worker.started_item.connect(self._on_download_started)
+        self._download_worker.progress_item.connect(self._on_item_progress)
+        self._download_worker.log_item.connect(self._on_item_log)
+        self._download_worker.finished_item.connect(self._on_download_finished)
+        self._download_worker.skipped_item.connect(self._on_item_skipped)
+        self._download_worker.all_finished.connect(self._on_downloads_finished)
+        self._download_worker.start()
+        self._update_job_actions()
+
+    def _on_download_started(self, row: int, msg: str):
+        self._processing_row = row
+        self._progress_started.pop(row, None)
+        self._set_status(row, msg)
+        self._update_job_actions()
+
+    def _on_download_finished(self, row: int, result: JobResult):
+        self._results[row] = result
+        name = self._queue_recordings[row].display_name if row < len(self._queue_recordings) else str(row)
+        if result.cancelled:
+            self._set_status(row, "Cancelled")
+            self._set_queue_status(row, "Cancelled")
+            self._set_output_empty(row)
+        elif result.error:
+            msg = self._format_job_error(result.error)
+            self._set_status(row, f"Failed: {msg}", error=True)
+            self._set_queue_status(row, f"Failed: {msg}")
+            self._set_output_empty(row)
+            self._log(f"ERROR [{name}]: {msg}")
+        else:
+            bar = self._progress_bar_at(row)
+            if isinstance(bar, QProgressBar):
+                bar.setValue(100)
+                bar.setFormat("%p%")
+            self._set_status(row, "Downloaded")
+            self._set_queue_status(row, "Downloaded")
+            self._set_output_cell(row, result.output_paths)
+            self.recordings_tab.refresh_cache_status()
+        self._progress_started.pop(row, None)
+        self._persist_queue()
+        self._update_job_actions()
+
+    def _on_downloads_finished(self):
+        cancelled = bool(self._download_worker and self._download_worker.was_cancelled())
+        self._processing_row = None
+        self.cancel_btn.setEnabled(False)
+        self._update_go_button()
+        self._update_job_actions()
+        self._log("Download cancelled." if cancelled else "Downloads finished.")
 
     def _row_progress(self, row: int | None) -> str:
         """Saved-progress summary for a queue row, or "" when there is none."""
@@ -994,7 +1320,10 @@ class MainWindow(QMainWindow):
         else:
             menu.exec()
 
-    def _append_queue_rows(self, recs: list[Recording], start_row: int):
+    def _append_queue_rows(self, recs: list[Recording], start_row: int, *, record: bool = True):
+        """Add rows to the jobs table. ``record`` writes them to the processing
+        history as queued; a download-only batch is not a transcription and
+        passes False so the recordings list does not call them queued."""
         for i, rec in enumerate(recs):
             row = start_row + i
             self.queue.insertRow(row)
@@ -1005,7 +1334,8 @@ class MainWindow(QMainWindow):
             self.queue.setItem(row, 2, self._queue_item("Queued"))
             self._set_progress_cell(row)
             self._set_output_empty(row, "")
-        history.record_many(recs, history.QUEUED)
+        if record:
+            history.record_many(recs, history.QUEUED)
         self.recordings_tab.refresh_statuses()
 
     def _populate_queue(self, recs: list[Recording]):
@@ -1346,6 +1676,19 @@ class MainWindow(QMainWindow):
             self._cleanup_worker.cancel()
             self._log("Cancelling AI Cleanup…")
             return
+        if self._identify_worker and self._identify_worker.isRunning():
+            self._identify_worker.cancel()
+            self._log("Cancelling speaker identification…")
+            return
+        if self._identify_context is not None:
+            # Between steps: nothing to interrupt, just a run not to start.
+            self._abort_identification("Run cancelled before transcription.")
+            return
+        if self._download_worker and self._download_worker.isRunning():
+            self._download_worker.cancel()
+            self.cancel_btn.setEnabled(False)
+            self._log("Cancelling download…")
+            return
         if self._diar_worker and self._diar_worker.isRunning():
             self._diar_worker.cancel()
             self._log("Cancelling speaker detection…")
@@ -1615,11 +1958,13 @@ class MainWindow(QMainWindow):
 
     # ---- helpers ------------------------------------------------------
     def _update_go_button(self):
-        if self._jobs_busy():
-            self.start_btn.setEnabled(False)
-            return
+        busy = self._jobs_busy()
         count = len(self._collect_selection())
-        self.start_btn.setEnabled(count > 0)
+        self.start_btn.setEnabled(count > 0 and not busy)
+        self.start_opts_btn.setEnabled(count > 0 and not busy)
+        # Local files are already on disk; only cloud recordings can be fetched.
+        on_plaud = self.tabs.currentWidget() is self.recordings_tab
+        self.download_btn.setEnabled(on_plaud and count > 0 and not busy)
 
     @staticmethod
     def _fmt_eta(seconds: float) -> str:

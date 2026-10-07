@@ -41,14 +41,41 @@ ENGINE_LABELS = {
 #: Engines that transcribe and separate speakers in one pass, so pyannote and
 #: the HuggingFace token play no part. None of them return a voice embedding
 #: either, so an enrolled voiceprint cannot name anyone on these paths - with
-#: one exception: MAI can be run as a decoder only, with pyannote separating
-#: the speakers locally, and then voiceprints work as they do for Whisper.
+#: two exceptions: MAI and ElevenLabs can each be run as a decoder only, with
+#: pyannote separating the speakers locally, and then voiceprints work as they
+#: do for Whisper.
 CLOUD_ENGINES = (ENGINE_ELEVENLABS, ENGINE_GEMINI, ENGINE_MAI)
 
 
 def mai_decodes_locally(opts: TranscribeOptions) -> bool:
     """MAI for the words, pyannote for the speakers."""
     return opts.engine == ENGINE_MAI and (opts.mai_speakers or "local") == "local"
+
+
+def elevenlabs_decodes_locally(opts: TranscribeOptions) -> bool:
+    """Scribe for the words, pyannote for the speakers.
+
+    Unlike MAI this needs a reason to leave Scribe's own speaker labels
+    behind: they work at any length. The reason is voiceprints, which need
+    pyannote's clusters, so the local path is taken only when pyannote could
+    actually run — a HuggingFace token is saved and speakers are wanted. With
+    neither, Scribe keeps labelling speakers itself rather than nobody doing it.
+    """
+    return (
+        opts.engine == ENGINE_ELEVENLABS
+        and (opts.elevenlabs_speakers or "local") == "local"
+        and opts.diarization_enabled
+        and bool((opts.hf_token or "").strip())
+    )
+
+
+def decodes_locally(opts: TranscribeOptions) -> bool:
+    """True when pyannote, not the engine, will separate the speakers."""
+    return (
+        opts.engine == ENGINE_LOCAL
+        or mai_decodes_locally(opts)
+        or elevenlabs_decodes_locally(opts)
+    )
 
 
 @dataclass
@@ -70,6 +97,11 @@ class TranscribeOptions:
     #: Which denoiser ran before this file reached us — identity only, so a
     #: saved transcript is not restored across a change of front-end.
     denoise: str = ""
+    #: The recording was cut to its first N minutes before reaching us. 0 is
+    #: the whole thing. Identity only, like ``denoise``: the cut happens in the
+    #: job runner, and this keeps a partial transcript from being restored as
+    #: a full one.
+    limit_minutes: int = 0
     vad_enabled: bool = True
     vad_parameters: dict | None = None
     #: Names, products and jargon to bias the decoder toward. See transcriber_studio.vocab_bias.
@@ -80,6 +112,11 @@ class TranscribeOptions:
     voiceprint_threshold: float = 0.55
     voiceprint_margin: float = 0.10
     voiceprint_min_speech_s: float = 15.0
+    #: Names the user has already put on pyannote's raw labels for this run
+    #: (SPEAKER_00 -> "Alice"), from listening to samples before transcribing.
+    #: These win over anything voiceprint matching would say: the user heard
+    #: the voice, the matcher only measured it.
+    known_speakers: dict[str, str] | None = None
     #: Penalty applied to tokens the decoder has already emitted. 1.0 is off,
     #: and off is the library default. The guard above stops a hallucination
     #: *carrying over* between windows; neither it nor the VAD does anything
@@ -96,6 +133,11 @@ class TranscribeOptions:
     elevenlabs_api_key: str = ""
     elevenlabs_model: str = ""
     tag_audio_events: bool = False  # ElevenLabs only: mark laughter, applause…
+    #: Who separates the speakers on ElevenLabs. "local" runs pyannote here on
+    #: Scribe's words, which returns the embeddings voiceprints need; "scribe"
+    #: keeps Scribe's own labels, which carry no voice data. See
+    #: elevenlabs_decodes_locally() for when "local" actually applies.
+    elevenlabs_speakers: str = "local"  # local | scribe
     gemini_api_key: str = ""        # the Google AI key, shared with AI Cleanup
     gemini_model: str = ""
     gemini_mode: str = ""           # smart | verbatim
@@ -138,6 +180,28 @@ def expected_model_label(opts: TranscribeOptions) -> str:
 
 def faster_whisper_available() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
+
+
+def with_known_speakers(
+    recognized: dict[str, str], known: dict[str, str] | None, log=None,
+) -> dict[str, str]:
+    """Recognised names, overridden by the ones the user put on by ear.
+
+    Both are keyed by pyannote's raw label. A name the user typed after
+    listening to a speaker is the better authority, so it replaces whatever
+    the matcher proposed for that label — and is announced, because a reader
+    of the log should be able to tell which names were heard and which were
+    measured.
+    """
+    merged = dict(recognized or {})
+    for label, name in (known or {}).items():
+        clean = (name or "").strip()
+        if not clean:
+            continue
+        if log and merged.get(label) != clean:
+            log(f"Speaker {label} is {clean} (named from the samples you heard).")
+        merged[label] = clean
+    return merged
 
 
 def _resolve_device_compute(device: str, compute_type: str) -> tuple[str, str]:
@@ -366,7 +430,26 @@ class Transcriber:
                 recording, audio_path, None, None, opts, progress_cb, log,
                 should_cancel, resume, decoder=stt_mai.decode,
             )
+        if elevenlabs_decodes_locally(opts):
+            for line in pipeline_summary(opts):
+                log(line)
+            log(
+                "ElevenLabs Scribe decodes the words; speakers are detected here, "
+                "so enrolled voices can be recognised."
+            )
+            return self._transcribe_single(
+                recording, audio_path, None, None, opts, progress_cb, log,
+                should_cancel, resume, decoder=stt_elevenlabs.decode,
+            )
         if opts.engine in CLOUD_ENGINES:
+            if (
+                opts.engine == ENGINE_ELEVENLABS and opts.diarization_enabled
+                and (opts.elevenlabs_speakers or "local") == "local"
+            ):
+                log(
+                    "No HuggingFace token saved, so Scribe labels the speakers "
+                    "itself — voiceprints cannot name anyone on this run."
+                )
             return self._transcribe_cloud(
                 recording, audio_path, opts, progress_cb, log, should_cancel
             )
@@ -560,6 +643,7 @@ class Transcriber:
                     min_speech=opts.voiceprint_min_speech_s,
                     source=recording.display_name,
                 )
+                names = with_known_speakers(names, opts.known_speakers, log)
                 segments, speakers_order = self._apply_speakers(
                     segments, words, diarized, log, names
                 )
@@ -580,9 +664,7 @@ class Transcriber:
         return TranscriptResult(
             recording=recording, segments=segments,
             language=detected_lang or (language or ""),
-            model=(
-                stt_mai.model_label(opts.mai_model) if decoder is not None else opts.model
-            ),
+            model=expected_model_label(opts) if decoder is not None else opts.model,
             speakers=speakers_order,
             speaker_embeddings=speaker_vectors,
             speaker_seconds=speaker_seconds,
@@ -619,7 +701,9 @@ class Transcriber:
             return decoder(
                 recording, audio_path, opts, progress_cb, log, should_cancel
             )
-        total_dur = recording.duration_seconds or audio_utils.probe(audio_path)["duration"]
+        # The file, not the listing: a run limited to the first ten minutes
+        # is decoding a ten-minute file, whatever the recording's length.
+        total_dur = audio_utils.probe(audio_path)["duration"] or recording.duration_seconds
         log("Transcribing audio…")
         return self._run_whisper(
             model, audio_path, language, opts, log, progress_cb, total_dur, should_cancel
