@@ -725,7 +725,12 @@ class MainWindow(QMainWindow):
         dlg = RunOptionsDialog(self.settings, recs, self)
         if not dlg.exec():
             return
-        self._begin_run(dlg.plan())
+        plan = dlg.plan()
+        if plan.save_audio and plan.audio_dir:
+            # The folder is remembered, so the next run and the Download audio
+            # button start where this one put things.
+            self.settings.audio_download_dir = plan.audio_dir
+        self._begin_run(plan)
 
     def _begin_run(self, plan: RunPlan | None):
         recs = self._collect_selection()
@@ -983,10 +988,12 @@ class MainWindow(QMainWindow):
                 "Tick one or more PLAUD recordings first. Local files are already on disk.",
             )
             return
-        start_in = self.settings.output_dir or str(Path.home())
+        start_in = self.settings.audio_download_dir or str(Path.home() / "Downloads")
         dest = QFileDialog.getExistingDirectory(self, "Save audio to", start_in)
         if not dest:
             return
+        self.settings.audio_download_dir = dest
+        config.save(self.settings)
         start_row = self.queue.rowCount()
         self._append_queue_rows(recs, start_row, record=False)
         self.start_btn.setEnabled(False)

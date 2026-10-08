@@ -36,6 +36,14 @@ class RunPlan:
     #: 0 is the whole recording. For a cheap look at how an engine or a
     #: glossary does on a long meeting.
     limit_minutes: int = 0
+    #: What to call the transcript files, in place of the usual naming: a
+    #: template ("{date}_{name}") or a plain name used exactly as typed. Empty
+    #: is the usual naming. Several recordings under one plain name get the
+    #: " (2)", " (3)" suffixes rather than overwriting each other.
+    transcript_name: str = ""
+    #: Keep a copy of each PLAUD recording's audio, in audio_dir.
+    save_audio: bool = False
+    audio_dir: str = ""
 
     @classmethod
     def from_settings(cls, settings: Settings) -> RunPlan:
@@ -61,6 +69,8 @@ class RunPlan:
             diarization_enabled=self.detect_speakers or self.identify_speakers or self.identify_only,
             ai_cleanup_enabled=self.ai_cleanup and not self.identify_only,
             limit_minutes=max(0, int(self.limit_minutes)),
+            filename_override=(self.transcript_name or "").strip(),
+            save_audio_dir=(self.audio_dir or "").strip() if self.save_audio else "",
         )
         if self.speakers:
             run.min_speakers = self.speakers
@@ -77,6 +87,8 @@ class RunPlan:
         if self.limit_minutes:
             parts.append(f"first {self.limit_minutes} minutes only")
         who = f"{self.speakers} people" if self.speakers else "speaker count left to the model"
+        if self.save_audio and (self.audio_dir or "").strip():
+            parts.append(f"save the audio to {self.audio_dir.strip()}")
         if self.identify_only:
             parts.append(f"identify speakers only, no transcription ({who})")
             parts.append("denoise" if self.denoise else "no denoise")
@@ -86,4 +98,6 @@ class RunPlan:
         parts.append("denoise" if self.denoise else "no denoise")
         parts.append("detect speakers" if self.detect_speakers else "no speaker detection")
         parts.append("AI cleanup" if self.ai_cleanup else "no AI cleanup")
+        if (self.transcript_name or "").strip():
+            parts.append(f"transcript named {self.transcript_name.strip()!r}")
         return ", ".join(parts)

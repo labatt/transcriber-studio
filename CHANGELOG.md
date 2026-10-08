@@ -21,15 +21,22 @@ versions follow [Semantic Versioning](https://semver.org/).
   kept for the session and used by a later Go on the same recording. *Only the first N
   minutes* (ten by default) cuts every recording before any stage sees it — a cheap way to
   try an engine, a glossary or the denoiser on a long meeting; the cut is a stream copy and
-  is never mistaken for the full transcript when resuming.
+  is never mistaken for the full transcript when resuming. *Transcript filename* names this
+  run's files — a plain name or a template, used exactly as typed, without the `_cleaned_…`
+  suffix or the name-after-the-other-person rule — and several recordings under one name get
+  `(2)`, `(3)` rather than overwriting. *Save the audio to* keeps a copy of each PLAUD
+  recording's audio (the whole recording, even on a first-N-minutes run; named like the
+  transcript when one was given) in a folder that starts as Downloads and follows the last
+  choice; a failed copy is logged and never fails the job. Both are greyed out on an
+  identify-only run, where nothing is written.
 - **ElevenLabs Scribe with pyannote speakers.** Scribe now works the way MAI does: it supplies
   the words and pyannote separates the speakers locally, so voiceprints work on ElevenLabs
   transcripts too. Scribe's own speaker labels are still available from Settings → Engines, and
   are used automatically when no HuggingFace token is saved. The default Scribe model is now
   `scribe_v2`; v1 is deprecated upstream.
 - **Download audio** button: save the ticked PLAUD recordings' audio to a folder of your choice
-  without transcribing. The file also lands in the audio cache, so transcribing it later costs no
-  second download.
+  without transcribing. The folder starts as Downloads and remembers the last one used. The file
+  also lands in the audio cache, so transcribing it later costs no second download.
 
 ### Fixed
 

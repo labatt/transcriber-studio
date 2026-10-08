@@ -94,6 +94,10 @@ def _default_output_dir() -> str:
     return str(Path.home() / "Documents" / "Transcripts")
 
 
+def _default_download_dir() -> str:
+    return str(Path.home() / "Downloads")
+
+
 @dataclass
 class Settings:
     # --- engine ---
@@ -168,6 +172,9 @@ class Settings:
     # is you. Empty => no owner, and the first named speaker is used.
     owner_names: str = ""
     overwrite: bool = False         # False => add numeric suffix if exists
+    # Where "Download audio" and "Save the audio" put a recording's audio.
+    # Starts as the Downloads folder and follows the last folder chosen.
+    audio_download_dir: str = field(default_factory=_default_download_dir)
 
     # --- misc ---
     plaud_page_size: int = 50
@@ -226,6 +233,14 @@ class Settings:
     # trying an engine or a glossary on a long meeting without paying for the
     # whole thing.
     limit_minutes: int = 0
+    # --- this run only: name the transcript files, and keep the audio ---
+    # Also set only by "Go with options…" on the per-run copy. The filename
+    # is a template or a plain name used exactly as typed, in place of both
+    # the usual template and the name-after-the-other-person rule; empty is
+    # the usual naming. save_audio_dir, when set, is a folder that gets a copy
+    # of each PLAUD recording's audio next to its transcript run.
+    filename_override: str = ""
+    save_audio_dir: str = ""
 
     # --- audio front-end: denoise before anything else sees the audio ---
     # On hard audio this buys more than the model choice does; see transcriber_studio.denoise.

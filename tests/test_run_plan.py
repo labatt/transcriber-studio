@@ -132,3 +132,63 @@ def test_cleanup_cannot_be_chosen_without_a_model(app):
     dlg = RunOptionsDialog(Settings(ai_cleanup_enabled=True, ai_cleanup_model=""), [])
     assert not dlg.cleanup.isEnabled()
     assert dlg.plan().ai_cleanup is False
+
+
+# ---- naming the transcript and keeping the audio ---------------------
+def test_a_transcript_name_and_audio_folder_ride_on_the_run_copy_only():
+    s = Settings()
+    plan = RunPlan(transcript_name="  Board call  ", save_audio=True, audio_dir="D:/keep")
+    run = plan.apply(s)
+    assert run.filename_override == "Board call" and run.save_audio_dir == "D:/keep"
+    assert s.filename_override == "" and s.save_audio_dir == ""
+    # Unticked, the folder in the box means nothing.
+    assert RunPlan(save_audio=False, audio_dir="D:/keep").apply(s).save_audio_dir == ""
+    text = plan.describe()
+    assert "save the audio to D:/keep" in text and "transcript named 'Board call'" in text
+
+
+def test_the_dialog_names_the_run_and_keeps_the_audio(app):
+    from transcriber_studio.models import Recording, Source
+
+    plaud = Recording(source=Source.PLAUD, id="p1", name="Weekly sync", date="2026-10-07")
+    dlg = RunOptionsDialog(Settings(audio_download_dir="D:/Downloads"), [plaud])
+    assert dlg.filename.text() == "" and dlg.filename.placeholderText() == "2026-10-07_Weekly sync"
+    assert dlg.save_audio.isEnabled() and not dlg.save_audio.isChecked()
+    assert dlg.audio_dir.text() == "D:/Downloads" and not dlg.audio_dir.isEnabled()
+    plan = dlg.plan()
+    assert plan.transcript_name == "" and plan.save_audio is False
+    dlg.filename.setText("Board call.txt")
+    dlg.save_audio.setChecked(True)
+    assert dlg.audio_dir.isEnabled() and dlg.browse_btn.isEnabled()
+    plan = dlg.plan()
+    assert plan.transcript_name == "Board call.txt"
+    assert plan.save_audio and plan.audio_dir == "D:/Downloads"
+
+
+def test_saving_the_audio_is_offered_only_for_plaud_recordings(app):
+    from transcriber_studio.models import Recording, Source
+
+    local = Recording(source=Source.LOCAL, id="a.wav", name="a", local_path="a.wav")
+    dlg = RunOptionsDialog(Settings(), [local])
+    assert not dlg.save_audio.isEnabled()
+    dlg.save_audio.setChecked(True)
+    assert dlg.plan().save_audio is False
+
+
+def test_identify_only_greys_out_naming_and_keeping(app, monkeypatch):
+    from transcriber_studio import diarization
+    from transcriber_studio.models import Recording, Source
+
+    monkeypatch.setattr(diarization, "is_available", lambda: True)
+    plaud = Recording(source=Source.PLAUD, id="p1", name="n", date="2026-10-07")
+    dlg = RunOptionsDialog(Settings(hf_token="hf_x"), [plaud])
+    dlg.filename.setText("x")
+    dlg.save_audio.setChecked(True)
+    dlg.identify.setChecked(True)
+    dlg.identify_only.setChecked(True)
+    assert not dlg.filename.isEnabled() and not dlg.save_audio.isEnabled()
+    plan = dlg.plan()
+    assert plan.transcript_name == "" and plan.save_audio is False
+    dlg.identify_only.setChecked(False)
+    assert dlg.filename.isEnabled() and dlg.save_audio.isEnabled()
+    assert dlg.plan().transcript_name == "x" and dlg.plan().save_audio

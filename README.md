@@ -410,7 +410,12 @@ Two settings worth doing straight away:
    options…** asks first: how many people were there, whether to identify them by ear before
    transcribing (see [Speakers and voiceprints](#speakers-and-voiceprints)), and whether to run
    only the first ten minutes — the cheap way to try an engine or a glossary on a long meeting.
-   **Download audio** saves the ticked PLAUD recordings to a folder and does nothing else.
+   It also takes a *Transcript filename* for this run (a plain name, or a template with
+   `{date}`, `{name}` and the other tokens; used exactly as typed, no `_cleaned_` suffix), and
+   *Save the audio to* a folder, which keeps a copy of each PLAUD recording's audio — the whole
+   recording, named like the transcript when you named it — beside the run. The folder starts
+   as Downloads and remembers your last choice. **Download audio** saves the ticked PLAUD
+   recordings to that same folder and does nothing else.
 5. **When it finishes**, the Output column has buttons to open the folder and to rename the
    files. If speakers were detected, a rename dialog offers to put real names on them — that is
    what feeds the filename and the glossary — and a *Remember this voice* box next to each name

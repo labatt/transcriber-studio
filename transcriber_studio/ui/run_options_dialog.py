@@ -9,17 +9,23 @@ room, skip the denoiser, skip the AI pass. Nothing chosen here is saved.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
-from .. import config, diarization
+from .. import config, diarization, filename_builder
+from ..models import Source, TranscriptResult
 from ..run_plan import RunPlan
 from ..transcriber import ENGINE_GEMINI, ENGINE_LABELS
 from .speaker_count_dialog import MAX_SPEAKERS
@@ -128,6 +134,46 @@ class RunOptionsDialog(SheetDialog):
             self.cleanup.setChecked(False)
             self.cleanup.setToolTip("Pick a cleanup provider and model in the Options panel first.")
         form.addRow(self.cleanup)
+
+        # --- what comes out -------------------------------------------
+        self.filename = QLineEdit()
+        self.filename.setPlaceholderText(self._usual_stem(recordings) or "the usual name")
+        self.filename.setToolTip(
+            "What to call the transcript files this run. Used as typed; {date}, {name} "
+            "and the other template tokens are filled in, and each format adds its own "
+            "extension. Leave empty for the usual naming."
+        )
+        form.addRow("Transcript filename:", self.filename)
+        name_note = QLabel(
+            "Leave empty for the usual name. With several recordings, a plain name gets "
+            "(2), (3)… so nothing is overwritten."
+        )
+        name_note.setWordWrap(True)
+        name_note.setStyleSheet(muted_small())
+        form.addRow("", name_note)
+
+        self.save_audio = QCheckBox("Save the audio to")
+        self.save_audio.setToolTip(
+            "Keep a copy of each PLAUD recording's audio in this folder, next to the "
+            "transcript run. The whole recording is saved even when only the first "
+            "minutes are transcribed; it takes the transcript's name when you gave one."
+        )
+        self.audio_dir = QLineEdit(settings.audio_download_dir or str(Path.home() / "Downloads"))
+        self.audio_dir.setEnabled(False)
+        self.browse_btn = QPushButton("Browse…")
+        self.browse_btn.setEnabled(False)
+        self.browse_btn.clicked.connect(self._browse_audio_dir)
+        self.save_audio.toggled.connect(self.audio_dir.setEnabled)
+        self.save_audio.toggled.connect(self.browse_btn.setEnabled)
+        self._has_plaud = any(r.source == Source.PLAUD for r in recordings)
+        if not self._has_plaud:
+            self.save_audio.setEnabled(False)
+            self.save_audio.setToolTip("Local files are already on disk; nothing to save.")
+        audio_row = QHBoxLayout()
+        audio_row.addWidget(self.save_audio)
+        audio_row.addWidget(self.audio_dir, 1)
+        audio_row.addWidget(self.browse_btn)
+        form.addRow(audio_row)
         layout.addLayout(form)
 
         self._cleanup_allowed = has_model
@@ -157,6 +203,24 @@ class RunOptionsDialog(SheetDialog):
             return False, "Identifying speakers needs pyannote.audio installed (Setup)."
         return True, ""
 
+    def _usual_stem(self, recordings) -> str:
+        """What the first recording would be called with no name given."""
+        if not recordings:
+            return ""
+        try:
+            values = filename_builder.build_values(
+                TranscriptResult(recording=recordings[0]), 1, self.s.sanitize_names,
+            )
+            return filename_builder.render(self.s.filename_template, values, self.s.sanitize_names)
+        except Exception:
+            return ""
+
+    def _browse_audio_dir(self) -> None:
+        start_in = self.audio_dir.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Save audio to", start_in)
+        if chosen:
+            self.audio_dir.setText(chosen)
+
     def _on_identify_toggled(self, *_args) -> None:
         # Identifying speakers is speaker detection with a listen in the
         # middle, so the plain detection box is implied and locked on. Stopping
@@ -170,6 +234,13 @@ class RunOptionsDialog(SheetDialog):
             self.identify_only.setChecked(False)
         only = on and self.identify_only.isChecked()
         self.cleanup.setEnabled(self._cleanup_allowed and not only)
+        # Nothing is written on an identify-only run, so there is nothing to
+        # name and no run to keep the audio beside.
+        self.filename.setEnabled(not only)
+        self.save_audio.setEnabled(self._has_plaud and not only)
+        keep = self.save_audio.isEnabled() and self.save_audio.isChecked()
+        self.audio_dir.setEnabled(keep)
+        self.browse_btn.setEnabled(keep)
         ok = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
         ok.setText("▶  Identify" if only else "▶  Go")
 
@@ -183,4 +254,7 @@ class RunOptionsDialog(SheetDialog):
             detect_speakers=self.detect.isChecked(),
             ai_cleanup=self.cleanup.isEnabled() and self.cleanup.isChecked(),
             limit_minutes=int(self.limit_minutes.value()) if self.limit.isChecked() else 0,
+            transcript_name=self.filename.text().strip() if self.filename.isEnabled() else "",
+            save_audio=self.save_audio.isEnabled() and self.save_audio.isChecked(),
+            audio_dir=self.audio_dir.text().strip(),
         )

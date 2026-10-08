@@ -343,18 +343,19 @@ class JobRunner:
         return audio_path, diarized
 
     def download_audio(
-        self, recording: Recording, dest_dir: str, *, progress_cb=None, log_cb=None,
-        should_cancel: ShouldCancel = None,
+        self, recording: Recording, dest_dir: str, *, stem: str | None = None,
+        progress_cb=None, log_cb=None, should_cancel: ShouldCancel = None,
     ) -> str:
         """Fetch a recording's audio and put a copy where the user asked.
 
         The download itself goes through the cache, so a later transcription of
         the same recording costs no second download. The copy in ``dest_dir``
-        is the user's: named after the recording, never overwritten.
+        is the user's: named after the recording (or ``stem``, when the run
+        named its files), never overwritten.
         """
         source = self._source_audio(recording, progress_cb, log_cb, should_cancel)
         check_cancel(should_cancel, log_cb, message="Download cancelled.")
-        stem = filename_builder.sanitize(
+        stem = stem or filename_builder.sanitize(
             f"{recording.date}_{recording.display_name}" if recording.date
             else recording.display_name,
             self.s.sanitize_names,
@@ -399,6 +400,39 @@ class JobRunner:
             resume=resume,
         )
 
+    def output_stem(
+        self,
+        result: TranscriptResult,
+        index: int = 1,
+        *,
+        cleanup_provider: str | None = None,
+        cleanup_model: str | None = None,
+    ) -> str:
+        """The filename (without extension) this transcript's files get.
+
+        A name given for the run ("Go with options...") is used as typed:
+        tokens expanded, no "_cleaned_" suffix, since the point of typing one
+        is to get exactly that file. Otherwise the other person's name drives
+        it once they have one, and the template does the rest.
+        """
+        values = filename_builder.build_values(result, index, self.s.sanitize_names)
+        override = (getattr(self.s, "filename_override", "") or "").strip()
+        if override:
+            return filename_builder.render(
+                filename_builder.strip_output_extension(override), values, self.s.sanitize_names,
+            )
+        # Once the other speaker has a real name, that name drives the filename.
+        base_stem = filename_builder.person_stem(
+            result, self.s.sanitize_names, self.s.owner_names
+        ) or (
+            filename_builder.render(self.s.filename_template, values, self.s.sanitize_names)
+        )
+        if cleanup_provider and cleanup_model:
+            return filename_builder.cleanup_stem(
+                base_stem, cleanup_provider, cleanup_model, self.s.sanitize_names
+            )
+        return base_stem
+
     def write_outputs(
         self,
         result: TranscriptResult,
@@ -409,19 +443,9 @@ class JobRunner:
     ) -> list[str]:
         out_dir = Path(self.s.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        values = filename_builder.build_values(result, index, self.s.sanitize_names)
-        # Once the other speaker has a real name, that name drives the filename.
-        base_stem = filename_builder.person_stem(
-            result, self.s.sanitize_names, self.s.owner_names
-        ) or (
-            filename_builder.render(self.s.filename_template, values, self.s.sanitize_names)
+        stem = self.output_stem(
+            result, index, cleanup_provider=cleanup_provider, cleanup_model=cleanup_model
         )
-        if cleanup_provider and cleanup_model:
-            stem = filename_builder.cleanup_stem(
-                base_stem, cleanup_provider, cleanup_model, self.s.sanitize_names
-            )
-        else:
-            stem = base_stem
         written = []
         for fmt in self.s.formats:
             text = formatters.render(result, fmt, self.s)
@@ -479,6 +503,7 @@ class JobRunner:
                 cleanup_model=self.s.ai_cleanup_model if cleaned else None,
             )
             resume.discard()   # exported: there is nothing left to resume
+            paths += self._keep_audio(recording, transcript, index, log_cb)
             return JobResult(
                 recording,
                 paths,
@@ -491,6 +516,28 @@ class JobRunner:
             return JobResult(recording, cancelled=True)
         except Exception as e:  # surfaced to the queue row
             return JobResult(recording, error=str(e))
+
+    def _keep_audio(self, recording, transcript, index, log_cb) -> list[str]:
+        """Copy the recording's audio beside the run when the plan asked for it.
+
+        Only PLAUD recordings: a local file is already wherever the user keeps
+        it. The copy is the whole recording even on a first-N-minutes run, and
+        takes the transcript's name when the run gave one. Not cancellable:
+        the transcript is on disk by now, and this is a local copy of a file
+        the run just used.
+        """
+        dest_dir = (getattr(self.s, "save_audio_dir", "") or "").strip()
+        if not dest_dir or recording.source != Source.PLAUD:
+            return []
+        named = bool((getattr(self.s, "filename_override", "") or "").strip())
+        stem = self.output_stem(transcript, index) if named else None
+        try:
+            return [self.download_audio(recording, dest_dir, stem=stem, log_cb=log_cb)]
+        except Exception as e:
+            # The transcript is written; a failed copy must not fail the job.
+            if log_cb:
+                log_cb(f"Could not save the audio to {dest_dir}: {e}")
+            return []
 
     def _transcribe_or_restore(
         self, recording, index, progress_cb, log_cb, should_cancel, resume

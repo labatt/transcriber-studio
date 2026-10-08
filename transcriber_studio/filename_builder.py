@@ -171,6 +171,20 @@ def build_values(result: TranscriptResult, index: int, sanitize_names: bool) -> 
     return {k: sanitize(str(v), sanitize_names) for k, v in raw.items()}
 
 
+#: Extensions a typed filename may end in that are the app's own output
+#: formats; they are dropped because each format adds its own.
+OUTPUT_EXTENSIONS = {"txt", "srt", "vtt", "json", "md"}
+
+
+def strip_output_extension(name: str) -> str:
+    """``"Board call.txt"`` -> ``"Board call"``; a dot inside a name is kept."""
+    name = (name or "").strip()
+    stem, dot, ext = name.rpartition(".")
+    if dot and stem and ext.lower() in OUTPUT_EXTENSIONS:
+        return stem
+    return name
+
+
 def render(template: str, values: dict[str, str], sanitize_names: bool = True) -> str:
     out = template
     for token, value in values.items():
